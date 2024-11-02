@@ -15,12 +15,13 @@ import "os"
 import "fmt"
 
 func main() {
-	if len(os.Args) < 2 {
+	if len(os.Args) < 2 { // 即从 命令行输入的?
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
 		os.Exit(1)
 	}
+	// 从第二个参数开始接受文件!
 
-	m := mr.MakeCoordinator(os.Args[1:], 10)
+	var m = mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}
