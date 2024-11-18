@@ -65,6 +65,33 @@ func (rf *Raft) findLastLogIndexOfTerm(term int) int {
 	return -1 // 如果没有找到指定的 Term，返回 -1
 }
 
+func (rf *Raft) findFirstLogIndexOfTerm(term int) int {
+	// 从日志数组的开头开始查找，寻找第一个指定 Term 的索引
+	for i := 0; i < len(rf.lm.logs); i++ {
+		if rf.lm.logs[i].Term == term {
+			return i // 返回找到的第一个索引
+		}
+	}
+	return -1 // 如果没有找到指定的 Term，返回 -1
+}
+
+// 覆盖冲突的日志, 从leader, 因为以leader为准
+// 注意entries是一些存放 指向log 的指针哦
+func (lm *LogManager) appendFrom(from int, entries []*LogEntry) {
+	trimmedIndex := lm.lastTrimmedIndex
+	startIndex := from - trimmedIndex - 1
+
+	// 如果需要覆盖日志
+	if startIndex < len(lm.logs) {
+		lm.logs = lm.logs[:startIndex]
+	}
+
+	// 追加新日志条目（解引用指针）
+	for _, entry := range entries {
+		lm.logs = append(lm.logs, *entry) // 追加解引用后的日志条目
+	}
+}
+
 func (lm *LogManager) getEntriesFrom(nextIndex int) []*LogEntry {
 	// 计算实际的数组起始索引
 	arrayIndex := nextIndex - lm.lastTrimmedIndex - 1
@@ -120,6 +147,7 @@ func (lm *LogManager) persist() {
 }
 
 // ApplySnapshot replaces the log with the snapshot up to lastIncludedIndex and lastIncludedTerm.
+// 用这个方法来实现?
 func (lm *LogManager) ApplySnapshot(snapshot []byte, lastIncludedIndex, lastIncludedTerm int) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
@@ -131,6 +159,28 @@ func (lm *LogManager) ApplySnapshot(snapshot []byte, lastIncludedIndex, lastIncl
 	// 持久化快照元数据
 	lm.persist()
 	lm.persister.Save(lm.persister.ReadRaftState(), snapshot)
+}
+
+// todo , 传来的index是已经确定在快照中的 截止索引 ,此时需要 维护一些变量 ,并且维护logs 数组
+func (lm *LogManager) trim(index int) {
+	// 确保裁剪的索引是合法的
+	if index <= lm.lastTrimmedIndex {
+		return // 已经裁剪过了，直接返回
+	}
+
+	// 计算裁剪的相对索引, 即要裁剪的 索引的绝对值
+	relativeIndex := index - lm.lastTrimmedIndex - 1
+
+	// 裁剪日志, 注意判断是否越界, 越界了表示所有 日志都应该清空
+
+	if relativeIndex >= len(lm.logs) {
+		lm.logs = nil // 如果裁剪范围包含所有日志，清空日志数组
+	} else {
+		lm.logs = lm.logs[relativeIndex:] // 保留从裁剪点之后的日志
+	}
+
+	// 更新最后裁剪的索引
+	lm.lastTrimmedIndex = index
 }
 
 // Restore restores log and snapshot metadata from persisted state.
@@ -183,4 +233,19 @@ func (lm *LogManager) len() int {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	return lm.lastTrimmedIndex + len(lm.logs)
+}
+
+// 截取范围
+func (lm *LogManager) split(start, end int) []LogEntry {
+	// 确保 start 和 end 的范围合法
+	if start < lm.lastTrimmedIndex+1 || start > end || end > lm.lastTrimmedIndex+1+len(lm.logs) {
+		return nil // 返回空切片表示范围非法
+	}
+
+	// 根据日志的裁剪偏移量调整范围
+	relativeStart := start - lm.lastTrimmedIndex - 1
+	relativeEnd := end - lm.lastTrimmedIndex - 1
+
+	// 返回指定范围的日志条目
+	return lm.logs[relativeStart:relativeEnd]
 }

@@ -20,6 +20,8 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
+	"fmt"
+	"log"
 	"math/rand"
 
 	"sync"
@@ -46,7 +48,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-
+	CommandTerm  int
 	// For 3D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -77,36 +79,43 @@ type Raft struct {
 	currentTerm int         // 当前任期
 	votedFor    int         // 当前任期投票给了谁
 	lm          *LogManager // 管理日志存储
-	snapshot    []byte      // 上一次保存的快照
+
+	snapshot []byte // 上一次保存的快照
 
 	//volatile 属性 , 易失属性
 
 	// 易失属性
 	state RaftState // 当前角色状态
 
-	commitIndex   int           // 已提交的最大下标
-	lastApplied   int           // 以应用到状态机的最大下标( 提交和应用没是两回事
-	applyCh       chan ApplyMsg // apply通道 , 用于和peer交流
-	applyCond     *sync.Cond    // apply协程唤醒条件
-	installSnapCh chan int      // install snapshot的信号通道，传入trim index
-	backupApplied bool          // 从磁盘恢复的snapshot已经apply
-	notTicking    chan bool     // 没有进行选举计时
-	electionTimer *time.Timer   // 选举计时器
+	commitIndex int           // 已提交的最大下标
+	lastApplied int           // 以应用到状态机的最大下标( 提交和应用没是两回事
+	applyCh     chan ApplyMsg // apply通道 , 用于和peer交流
+	applyCond   *sync.Cond    // apply协程唤醒条件 ,应该根据 mu 创建 , todo apply携程实现
+
+	installSnapCh chan int    // install snapshot的信号通道，传入trim index
+	backupApplied bool        // 从磁盘恢复的snapshot已经apply
+	notTicking    chan bool   // 没有进行选举计时
+	electionTimer *time.Timer // 选举计时器
 
 	// Leader特有字段
 	nextIndexes    []int       // 对于每个follower，leader要发送的下一个复制日志下标
 	matchIndexes   []int       // 已知每个follower和自己一致的最大日志下标
 	heartbeatTimer *time.Timer // 心跳计时器
 
+	stateMachine *StateMachine
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
 
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()         // 加锁以确保线程安全
+	defer rf.mu.Unlock() // 解锁
 
-	var term int
-	var isleader bool
-	// Your code here (3A).
+	// 获取当前任期
+	term := rf.currentTerm
+
+	// 判断是否是领导者
+	isleader := (rf.state == LEADER)
 
 	return term, isleader
 }
@@ -118,31 +127,87 @@ func (rf *Raft) GetState() (int, bool) {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
-	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
 
-	// 注意, 应该是需要锁的
+func (rf *Raft) persist() {
+	// 加锁以确保线程安全
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// 创建一个缓冲区
 	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w) // 创建一个新的写入 的encoder
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.lm) // 持久化日志
-	e.Encode(rf.snapshot)
+	// 使用 labgob 创建一个编码器
+	e := labgob.NewEncoder(w)
 
-	raftstate := w.Bytes() //将缓冲区的东西写到 机器
-	// 返回结果
-	// 将raft 结果 保存
+	// 持久化关键状态
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.lm) != nil {
+		log.Fatalf("Failed to encode Raft state")
+	}
+
+	// 将缓冲区转换为字节数组
+	raftstate := w.Bytes()
+
+	// 将持久化状态保存到存储器中
+	// 如果未实现快照，传递 nil 作为第二个参数 , 将 应用交给persister做
 	rf.persister.Save(raftstate, rf.snapshot)
+}
+
+//func (rf *Raft) persist() {
+//	// Your code here (3C).
+//	// Example:
+//	// w := new(bytes.Buffer)
+//	// e := labgob.NewEncoder(w)
+//	// e.Encode(rf.xxx)
+//	// e.Encode(rf.yyy)
+//	// raftstate := w.Bytes()
+//	// rf.persister.Save(raftstate, nil)
+//
+//	// 注意, 应该是需要锁的
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//
+//	w := new(bytes.Buffer)
+//	e := labgob.NewEncoder(w) // 创建一个新的写入 的encoder
+//	e.Encode(rf.currentTerm)
+//	e.Encode(rf.votedFor)
+//	e.Encode(rf.lm) // 持久化日志
+//	// 这里并不 持久日志,只是一些基本的数据, 如leader才有的或者 fo 的投票给谁的一个数据
+//	raftstate := w.Bytes() //将缓冲区的东西写到 机器
+//	// 返回结果
+//	// 将raft 结果 保存
+//	rf.persister.Save(raftstate, rf.snapshot)
+//}
+
+// restore previously persisted state.
+func (rf *Raft) readPersist(data []byte) {
+	if data == nil || len(data) < 1 { // 如果没有持久化数据，直接返回
+		return
+	}
+
+	r := bytes.NewBuffer(data) // 创建一个读取缓冲区
+	d := labgob.NewDecoder(r)  // 创建解码器
+
+	// 定义临时变量用于接收解码数据
+	var currentTerm int
+	var votedFor int
+	var lm LogManager
+
+	// 解码持久化数据
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&lm) != nil {
+		log.Fatalf("Failed to decode persisted state") // 解码失败，记录错误日志并退出
+	}
+
+	// 加锁保护 Raft 状态
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 恢复 Raft 的状态
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.lm = &lm
 }
 
 // todo heartbeat
@@ -235,7 +300,7 @@ func (rf *Raft) fastBackup(server int, reply AppendEntriesReply) {
 	}
 }
 
-// todo, 实现的完善
+// todo, 实现的完善, aggrement
 func (rf *Raft) agreement(server int, nextIndex int, isHeartbeat bool) {
 	rf.mu.Lock()
 
@@ -268,32 +333,6 @@ func (rf *Raft) agreement(server int, nextIndex int, isHeartbeat bool) {
 			rf.agreement(server, rf.nextIndexes[server], isHeartbeat)
 		}
 	}
-}
-
-// RequestAppendEntries follower 处理日志同步
-// 对xTerm等进行一个操作 , 不断的处理 leader寻找 缺失日志位置的情况
-func (rf *Raft) RequestAppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-
-}
-
-// restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (3C). todo
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
 }
 
 // 超时选举
@@ -344,7 +383,7 @@ func (rf *Raft) kickOffElection() {
 	}
 }
 
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
@@ -495,6 +534,7 @@ func (rf *Raft) resetElectionTimer() {
 	}
 }
 
+// 重置 心跳
 func (rf *Raft) resetHeartbeatTimer() {
 	if rf.heartbeatTimer == nil {
 		rf.heartbeatTimer = time.NewTimer(100 * time.Millisecond)
@@ -624,9 +664,61 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-// todo initleader
+// todo , 初始化leader, 一些leader才有的属性
 func (rf *Raft) initLeader() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 因为要访问 shared
 
+	rf.state = LEADER
+
+	// Initialize nextIndex and matchIndex for each follower
+	rf.nextIndexes = make([]int, len(rf.peers))
+	rf.matchIndexes = make([]int, len(rf.peers))
+
+	// Set nextIndex to the index after the last log entry
+	lastLogIndex := rf.getLastLogIndex()
+	for i := range rf.peers {
+		rf.nextIndexes[i] = lastLogIndex + 1
+		rf.matchIndexes[i] = 0
+	}
+
+	// 重置 心跳
+	if rf.heartbeatTimer != nil {
+		rf.heartbeatTimer.Stop()
+	}
+
+	rf.resetHeartbeatTimer()
+
+	// 开始 发送心跳
+	go rf.sendHeartbeats()
+}
+
+// leader统计matchIndex，尝试提交
+func (rf *Raft) tryCommit() {
+	total := len(rf.peers)
+	// 找到一个最大的N>commitIndex，使得超过半数的follower的matchIndex大于等于N，
+	// 且leader自己N位置的log的Term等于当前Term   （这一点很重要，安全性问题中提过, 否则的话需要提交一个空日志来确保最新的要提交的日志是自己的term
+	// 那么N的位置就可以提交
+
+	len := rf.lm.len()
+	for N := rf.commitIndex + 1; N <= len; N++ { // 遍历所有的 当前commit 的index , 去找到第一个能提交的 index , 即满足半数
+		majorityCnt := 1 // 记录是否超过半数
+		for _, matchIndex := range rf.matchIndexes {
+			if matchIndex >= N && rf.lm.logs[N].Term == rf.currentTerm { // 判断是否当前任期 并且是否 对应的  节点有超过 当前的 index
+				// 注意设计的matchindex 和next Index 的区别, 前者是提交的后者是发送copy 对应位置
+				majorityCnt++
+			}
+		}
+		if majorityCnt > total/2 {
+			rf.commitIndex = N // 更新提交Index
+		}
+	}
+	rf.mu.Lock()
+	rf.applyCond.Signal() // 通过channel 唤醒 异步的apply , 之前一直被阻塞
+	// 阻塞也是
+
+	rf.mu.Unlock()
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -638,6 +730,8 @@ func (rf *Raft) initLeader() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
+
+// todo make函数, 功能: ?
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -654,4 +748,241 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	return rf
+}
+
+// RequestAppendEntries follower 处理日志同步
+// 对xTerm等 进行一个操作 , 不断的处理 leader寻找 缺失日志位置的情况 ( 什么情况下需要发送 xterm? 即你 拒绝了 leader请求的时候
+
+func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm { // 说明这个leader已经过期
+		reply.Success = false
+		return
+	}
+	// 进入新的一个Term，更新( 如果 发过来的人 的 term更新的话, 自己肯定不进行选举,  遂reset选举计时器
+	if args.Term > rf.currentTerm {
+		rf.enterNewTerm(args.Term) // 改变votedFor
+	} else {
+		rf.state = FOLLOWER // 不改变votedFor
+	}
+	rf.resetElectionTimer() // 刷新选举计时
+	rf.mu.Lock()
+	// 因为需要访问共享的变量, 所以 锁到结束为止
+	defer rf.mu.Unlock()
+
+	if args.PrevLogIndex < rf.commitIndex || rf.findLastLogIndexOfTerm(args.Term) > args.PrevLogIndex {
+		// 说明这个请求滞后了 , 竟然比当前fo节点还靠后, 回复失败
+		reply.XLen = rf.lm.len()
+		reply.XTerm = -1
+		reply.Success = false
+		return
+	}
+	// 一致性检查, 看是否日志冲突?  如果
+	if args.PrevLogIndex > rf.lm.len() {
+		reply.XLen = rf.lm.len()
+		reply.XTerm = -1
+		reply.Success = false
+		return
+	}
+	// 如果不在一个 term内, 表示冲突, 返回false
+	if args.PrevLogIndex >= 1 && args.PrevLogIndex > rf.lm.lastTrimmedIndex { // 如果prevIndex已经被裁剪了，那一定不冲突
+		if rf.lm.GetEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
+			// 有冲突了, 此时 需要进行一致性的检查, 连续的 fo和leader之间的确认,所以需要 将 xterm 和xidnex 返回
+			// 因为使用的是快速定位, fastbackup, 定位先以term为单位, 找到term后, 以index为单位
+
+			reply.XTerm = rf.lm.GetEntry(args.PrevLogIndex).Term
+			reply.XIndex = rf.findFirstLogIndexOfTerm(reply.XTerm)
+			reply.Success = false
+			return
+		}
+	}
+	// 接下来就是接受日志, 并且覆盖
+
+	// 这里有可能leader传来的一部分log已经裁掉了，需要过滤一下
+
+	// 确定当前的 起始index , 谁靠后一点取谁
+	// 避免处理掉已经 裁剪掉的日志( 注意leader 的prelogindex即 这个日志体前一个日志的位置, 即提示你更新的位置
+
+	from := max(args.PrevLogIndex+1, rf.lm.lastTrimmedIndex+1)
+
+	// 确定需要过滤的 日志的个数, 并且不能越界
+	// from位置之前的是需要过滤的, 画个图很好理解
+	filter := min(from-args.PrevLogIndex-1, len(args.Entries)) // 防止越界,
+	args.Entries = args.Entries[filter:]
+	rf.lm.appendFrom(from, args.Entries) // 强制追加（覆盖）日志
+
+	// 提交log, 更新自己的 提交index 为 leader 提交的index 或者 本地的长度
+	// 因为这个长度是随着 term更新, 所以需要 判断一下哪个 长
+	//目前还在 lm里边的日志 , 即没有 持久apply 的日志 ,可能比 leader 的要长
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, rf.lm.len())
+	}
+	rf.applyCond.Signal() // 唤醒异步apply, 真正的将东西 本地化
+
+	rf.persist() // 将一些 信息持久化
+	reply.Success = true
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (rf *Raft) apply() {
+	// 先apply快照
+	if rf.lm.lastTrimmedIndex != 0 {
+		rf.applySnapshot()
+	}
+	rf.backupApplied = true // 已经
+	// 然后再apply剩余log
+	for !rf.killed() {
+		// 循环的去检查, 但是不意味着一直循环, 而是 等待唤醒而阻塞
+		// >=意味着没有 可以 apply 的snapshot
+		for rf.lastApplied >= rf.commitIndex {
+			// 每次休眠前先看有无快照可apply
+			select {
+			case index := <-rf.installSnapCh: // 获取快照的信息
+				// 这里获取到的就是apply 中的index, 即快照截止到了哪个索引, 并调用方法去更新
+
+				// 这两个操作要保证原子性
+				rf.trim(index)
+				// 去截断相关的日志, ? 应该就是 产生快照吧, 因为这个时候已经确定日志将会在快照里边, 所以 可以放心
+
+				rf.applySnapshot()
+			default:
+			}
+			rf.mu.Lock()
+			rf.applyCond.Wait() // 等待别处唤醒去apply，避免了并发冲突
+			rf.mu.Unlock()
+		}
+		rf.mu.Lock()
+		// commitIndex领先了
+		applyIndex := rf.lastApplied + 1
+		commitIndex := rf.commitIndex
+		entries := rf.lm.split(applyIndex, commitIndex+1) // 本轮要apply的所有log
+		rf.mu.Unlock()
+		// 这里用不到索引, 所以爆红
+		for _, log := range entries {
+			if applyIndex <= rf.lm.lastTrimmedIndex { // applyIndex落后快照了
+				break
+			}
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      log.Command,
+				CommandIndex: applyIndex,
+				CommandTerm:  log.Term, // 为了Lab3加的
+			}
+			rf.applyCh <- msg
+			rf.mu.Lock()
+			if rf.lastApplied > applyIndex { // 说明snapshot抢先一步了
+				rf.mu.Unlock()
+				break
+			}
+			rf.lastApplied = applyIndex
+			applyIndex++
+			rf.mu.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) trim(index int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 确保 trim 的索引是合法的
+	if index <= rf.lm.lastTrimmedIndex {
+		return // 如果裁剪索引已经被裁剪过，直接返回
+	}
+
+	// 裁剪日志
+	relativeIndex := index - rf.lm.lastTrimmedIndex - 1
+	if relativeIndex >= len(rf.lm.logs) {
+		// 如果要裁剪的范围大于日志数组，清空日志
+		rf.lm.logs = nil
+	} else {
+		// 从裁剪点之后的日志开始保留
+		rf.lm.logs = rf.lm.logs[relativeIndex:]
+	}
+
+	// 更新最后裁剪的索引
+	rf.lm.lastTrimmedIndex = index
+
+	// 持久化裁剪后的状态
+	rf.persist()
+}
+
+// todo 实现快照 的apply
+func (rf *Raft) applySnapshot() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 检查快照数据是否有效
+	if rf.snapshot == nil || len(rf.snapshot) == 0 {
+		return // 没有快照可应用
+	}
+
+	// 解码快照数据, 先将元数据搞出来
+	var snapshotState StateMachineState
+	if err := decodeSnapshot(rf.snapshot, &snapshotState); err != nil {
+		log.Fatalf("Failed to decode snapshot")
+	}
+
+	// 更新 Raft 的元数据
+	rf.commitIndex = snapshotState.LastIncludedIndex
+	rf.lastApplied = snapshotState.LastIncludedIndex
+	rf.lm.lastTrimmedIndex = snapshotState.LastIncludedIndex
+
+	// 恢复状态机
+	rf.stateMachine.Restore(snapshotState.Data)
+
+	// 持久化更新
+	rf.persist()
+}
+
+// StateMachineState todo 存储快照的元数据和信息的状态机
+type StateMachineState struct {
+	LastIncludedIndex int         // 快照包含的最后一个日志条目的索引
+	LastIncludedTerm  int         // 快照包含的最后一个日志条目的任期
+	Data              interface{} // 快照中的状态机数据
+}
+
+// 讲序列化的快照解码为 一个个这样的struct
+func decodeSnapshot(snapshot []byte, state *StateMachineState) error {
+	if snapshot == nil || len(snapshot) == 0 {
+		return fmt.Errorf("snapshot is empty")
+	}
+
+	r := bytes.NewBuffer(snapshot) // 创建读取缓冲区
+	d := labgob.NewDecoder(r)      // 创建解码器
+
+	// 解码快照数据
+	if err := d.Decode(&state.LastIncludedIndex); err != nil {
+		return fmt.Errorf("failed to decode LastIncludedIndex: %v", err)
+	}
+	if err := d.Decode(&state.LastIncludedTerm); err != nil {
+		return fmt.Errorf("failed to decode LastIncludedTerm: %v", err)
+	}
+	if err := d.Decode(&state.Data); err != nil {
+		return fmt.Errorf("failed to decode Data: %v", err)
+	}
+
+	return nil
+}
+
+type StateMachine struct {
+	state interface{} // 用于存储状态机的数据
+}
+
+// Restore 将快照数据恢复到状态机中
+func (sm *StateMachine) Restore(data interface{}) {
+	sm.state = data
 }
