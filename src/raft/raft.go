@@ -301,39 +301,73 @@ func (rf *Raft) fastBackup(server int, reply AppendEntriesReply) {
 }
 
 // todo, 实现的完善, aggrement
+
 func (rf *Raft) agreement(server int, nextIndex int, isHeartbeat bool) {
-	rf.mu.Lock()
+	for {
+		rf.mu.Lock()
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: nextIndex - 1,
+			PrevLogTerm:  rf.lm.GetEntry(nextIndex - 1).Term,
+			Entries:      rf.lm.getEntriesFrom(nextIndex),
+			LeaderCommit: rf.commitIndex,
+		}
+		rf.mu.Unlock()
 
-	// 构造 AppendEntriesArgs
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: nextIndex - 1,
-		PrevLogTerm:  rf.lm.GetEntry(nextIndex - 1).Term, // 获取前一个日志条目的任期
-		Entries:      rf.lm.getEntriesFrom(nextIndex),    // 从 nextIndex 开始的所有日志条目
-		LeaderCommit: rf.commitIndex,
-	}
+		reply := AppendEntriesReply{}
+		if !rf.sendAppendEntries(server, &args, &reply) {
+			break // 如果 RPC 失败，则退出
+		}
 
-	rf.mu.Unlock()
-
-	// 发送 AppendEntries RPC
-	reply := AppendEntriesReply{}
-	if rf.sendAppendEntries(server, &args, &reply) {
 		if reply.Success {
-			// 更新一致的位置
 			rf.mu.Lock()
-			rf.nextIndexes[server] = nextIndex + len(args.Entries)      // 更新为下一个索引
-			rf.matchIndexes[server] = nextIndex + len(args.Entries) - 1 // 更新 matchIndexes
+			rf.nextIndexes[server] = nextIndex + len(args.Entries)
+			rf.matchIndexes[server] = nextIndex + len(args.Entries) - 1
 			rf.mu.Unlock()
-			rf.tryCommit() // 尝试提交日志
+			rf.tryCommit()
+			break // 日志同步成功，退出循环
 		} else {
-			// 如果失败，说明还有不一致，调用 fastBackup
 			rf.fastBackup(server, reply)
-			// 再次调用 agreement，递归直到日志同步
-			rf.agreement(server, rf.nextIndexes[server], isHeartbeat)
+			nextIndex = rf.nextIndexes[server] // 更新 nextIndex
 		}
 	}
 }
+
+//	rf.mu.Lock()
+//
+//	// 构造 AppendEntriesArgs
+//	args := AppendEntriesArgs{
+//		Term:         rf.currentTerm,
+//		LeaderId:     rf.me,
+//		PrevLogIndex: nextIndex - 1,
+//		PrevLogTerm:  rf.lm.GetEntry(nextIndex - 1).Term, // 获取前一个日志条目的任期
+//		Entries:      rf.lm.getEntriesFrom(nextIndex),    // 从 nextIndex 开始的所有日志条目
+//		LeaderCommit: rf.commitIndex,
+//	}
+//
+//	rf.mu.Unlock()
+//
+//	// 发送 AppendEntries RPC
+//	reply := AppendEntriesReply{}
+//
+//	if rf.sendAppendEntries(server, &args, &reply) {
+//		if reply.Success {
+//			// 更新一致的位置
+//			rf.mu.Lock()
+//			rf.nextIndexes[server] = nextIndex + len(args.Entries)      // 更新为下一个索引
+//			rf.matchIndexes[server] = nextIndex + len(args.Entries) - 1 // 更新 matchIndexes
+//			rf.mu.Unlock()
+//			rf.tryCommit() // 尝试提交日志
+//		} else {
+//			// 如果失败，说明还有不一致，调用 fastBackup
+//			rf.fastBackup(server, reply)
+//			// 再次调用 agreement，递归直到日志同步, 这里的递归可能 处理不当, 如果缺少很多日志
+//			//可能导致 栈的溢出, 考虑使用for代替
+//
+//			rf.agreement(server, rf.nextIndexes[server], isHeartbeat)
+//		}
+//	}
 
 // 超时选举
 func (rf *Raft) kickOffElection() {
