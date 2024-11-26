@@ -87,10 +87,11 @@ type Raft struct {
 	// 易失属性
 	state RaftState // 当前角色状态
 
-	commitIndex int           // 已提交的最大下标
-	lastApplied int           // 以应用到状态机的最大下标( 提交和应用没是两回事
-	applyCh     chan ApplyMsg // apply通道 , 用于和peer交流
-	applyCond   *sync.Cond    // apply协程唤醒条件 ,应该根据 mu 创建 , todo apply携程实现
+	commitIndex int // 已提交的最大下标
+	lastApplied int // 以应用到状态机的最大下标( 提交和应用没是两回事
+
+	applyCh   chan ApplyMsg // apply通道 , 用于和peer交流
+	applyCond *sync.Cond    // apply协程唤醒条件  ,应该根据 mu 创建
 
 	installSnapCh chan int    // install snapshot的信号通道，传入trim index
 	backupApplied bool        // 从磁盘恢复的snapshot已经apply
@@ -101,7 +102,9 @@ type Raft struct {
 	nextIndexes    []int       // 对于每个follower，leader要发送的下一个复制日志下标
 	matchIndexes   []int       // 已知每个follower和自己一致的最大日志下标
 	heartbeatTimer *time.Timer // 心跳计时器
+	replicatorCond []*sync.Cond
 
+	// 待定
 	stateMachine *StateMachine
 }
 
@@ -210,7 +213,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lm = &lm
 }
 
-// todo heartbeat
+// todo heartbeat, 其实是一个广播行为,
 func (rf *Raft) sendHeartbeats() {
 	total := len(rf.peers)
 	args := AppendEntriesArgs{}
@@ -755,6 +758,20 @@ func (rf *Raft) tryCommit() {
 	rf.mu.Unlock()
 }
 
+const (
+	HeartbeatTimeout = 125
+	ElectionTimeout  = 1000
+)
+
+func StableHeartbeatTimeout() time.Duration {
+	return time.Duration(HeartbeatTimeout) * time.Millisecond
+}
+
+// todo globalRand
+func RandomizedElectionTimeout() time.Duration {
+	return time.Duration(ElectionTimeout+globalRand.Intn(ElectionTimeout)) * time.Millisecond
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -765,21 +782,47 @@ func (rf *Raft) tryCommit() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 
-// todo make函数, 功能: ?
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
-	// Your initialization code here (3A, 3B, 3C).
-
+	rf := &Raft{
+		peers:          peers,
+		persister:      persister,
+		me:             me,
+		dead:           0,
+		applyCh:        applyCh,
+		replicatorCond: make([]*sync.Cond, len(peers)),
+		state:          FOLLOWER,
+		currentTerm:    0,
+		votedFor:       -1,
+		lm: &LogManager{
+			logs:             make([]LogEntry, 1), // Initialize with a dummy entry at index 0
+			lastTrimmedIndex: 0,
+			lastTrimmedTerm:  0,
+			persister:        persister,
+		},
+		nextIndexes:    make([]int, len(peers)),
+		matchIndexes:   make([]int, len(peers)),
+		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()),    // 固定心跳, 时间是多少来着, 10s ?
+		electionTimer:  time.NewTimer(RandomizedElectionTimeout()), // 随机 选举时长
+	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
+	// 需要开共len(peer) - 1 个线程replicator，分别管理对应 peer 的复制状态
+	rf.applyCond = sync.NewCond(&rf.mu)
+	lastLog := rf.getLastLog()
+	for i := 0; i < len(peers); i++ {
+		rf.matchIndexes[i], rf.nextIndexes[i] = 0, lastLog.Index+1
+		if i != rf.me {
+			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
+			// start replicator goroutine to replicate entries in batch
+			go rf.replicator(i)
+		}
+	}
+	// start ticker goroutine to start elections， 用来触发 heartbeat timeout 和 election timeout
 	go rf.ticker()
+	// start applier goroutine to push committed logs into applyCh exactly once， ，用来往 applyCh 中 push 提交的日志并保证 exactly once
+	go rf.applier()
 
 	return rf
 }
@@ -954,7 +997,7 @@ func (rf *Raft) trim(index int) {
 	rf.persist()
 }
 
-// todo 实现快照 的apply
+// todo 实现快照 的apply, 即applyer
 func (rf *Raft) applySnapshot() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
