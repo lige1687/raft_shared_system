@@ -55,6 +55,20 @@ func (lm *LogManager) GetEntry(index int) LogEntry {
 	// 这里注意逻辑长度 , 和实际长度的区别, 实际长度是当前logs中有的
 	//
 }
+
+func (lm *LogManager) LastEntry() *LogEntry {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	// 如果日志数组为空，说明没有日志条目
+	if len(lm.logs) == 0 {
+		return nil
+	}
+
+	// 返回日志数组中的最后一个条目
+	return &lm.logs[len(lm.logs)-1]
+}
+
 func (rf *Raft) findLastLogIndexOfTerm(term int) int {
 	// 从日志数组的末尾开始查找，这样可以快速找到最后一个指定 Term 的索引
 	for i := len(rf.lm.logs) - 1; i >= 0; i-- {

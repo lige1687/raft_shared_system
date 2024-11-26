@@ -420,13 +420,48 @@ func (rf *Raft) kickOffElection() {
 	}
 }
 
-// Snapshot the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (3D).
+// 创建一个快照， 包含了 截取到指定的index 的所有信息， 服务不再包含该索引之前的所有日志
+// raft 尽可能快的trim这些日志
 
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	snapshotIndex := rf.getFirstLog().Index
+	if index <= snapshotIndex {
+		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
+		return
+	}
+	rf.logs = shrinkEntriesArray(rf.logs[index-snapshotIndex:])
+	rf.logs[0].Command = nil
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, snapshotIndex)
+}
+
+// todo trim
+func (rf *Raft) trim(index int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 确保 trim 的索引是合法的
+	if index <= rf.lm.lastTrimmedIndex {
+		return // 如果裁剪索引已经被裁剪过，直接返回
+	}
+
+	// 裁剪日志
+	relativeIndex := index - rf.lm.lastTrimmedIndex - 1
+	if relativeIndex >= len(rf.lm.logs) {
+		// 如果要裁剪的范围大于日志数组，清空日志
+		rf.lm.logs = nil
+	} else {
+		// 从裁剪点之后的日志开始保留
+		rf.lm.logs = rf.lm.logs[relativeIndex:]
+	}
+
+	// 更新最后裁剪的索引
+	rf.lm.lastTrimmedIndex = index
+
+	// 持久化裁剪后的状态
+	rf.persist()
 }
 
 // RequestVoteArgs example RequestVote RPC arguments structure.
@@ -692,6 +727,10 @@ type AppendEntriesArgs struct {
 	LeaderCommit int         //leader已经提交的日志 数
 }
 
+func (request AppendEntriesArgs) String() string {
+	return fmt.Sprintf("{Term:%v,LeaderId:%v,PrevLogIndex:%v,PrevLogTerm:%v,LeaderCommit:%v,Entries:%v}", request.Term, request.LeaderId, request.PrevLogIndex, request.PrevLogTerm, request.LeaderCommit, request.Entries)
+}
+
 // fo 回复leader 的内容
 type AppendEntriesReply struct {
 	Term    int // 当前 fo 的任期
@@ -767,7 +806,9 @@ func StableHeartbeatTimeout() time.Duration {
 	return time.Duration(HeartbeatTimeout) * time.Millisecond
 }
 
-// todo globalRand
+// global 应该是 随机产生的？还是论文给的，。。
+var globalRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+
 func RandomizedElectionTimeout() time.Duration {
 	return time.Duration(ElectionTimeout+globalRand.Intn(ElectionTimeout)) * time.Millisecond
 }
@@ -810,9 +851,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 需要开共len(peer) - 1 个线程replicator，分别管理对应 peer 的复制状态
 	rf.applyCond = sync.NewCond(&rf.mu)
-	lastLog := rf.getLastLog()
+
 	for i := 0; i < len(peers); i++ {
-		rf.matchIndexes[i], rf.nextIndexes[i] = 0, lastLog.Index+1
+		rf.matchIndexes[i], rf.nextIndexes[i] = 0, rf.lm.LastIndex()+1
 		if i != rf.me {
 			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
 			// start replicator goroutine to replicate entries in batch
@@ -914,6 +955,7 @@ func min(a, b int) int {
 	return b
 }
 
+// todo apply
 func (rf *Raft) apply() {
 	// 先apply快照
 	if rf.lm.lastTrimmedIndex != 0 {
@@ -969,32 +1011,6 @@ func (rf *Raft) apply() {
 			rf.mu.Unlock()
 		}
 	}
-}
-
-func (rf *Raft) trim(index int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// 确保 trim 的索引是合法的
-	if index <= rf.lm.lastTrimmedIndex {
-		return // 如果裁剪索引已经被裁剪过，直接返回
-	}
-
-	// 裁剪日志
-	relativeIndex := index - rf.lm.lastTrimmedIndex - 1
-	if relativeIndex >= len(rf.lm.logs) {
-		// 如果要裁剪的范围大于日志数组，清空日志
-		rf.lm.logs = nil
-	} else {
-		// 从裁剪点之后的日志开始保留
-		rf.lm.logs = rf.lm.logs[relativeIndex:]
-	}
-
-	// 更新最后裁剪的索引
-	rf.lm.lastTrimmedIndex = index
-
-	// 持久化裁剪后的状态
-	rf.persist()
 }
 
 // todo 实现快照 的apply, 即applyer
