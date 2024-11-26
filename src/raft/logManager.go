@@ -124,6 +124,20 @@ func (lm *LogManager) getEntriesFrom(nextIndex int) []*LogEntry {
 	return result
 }
 
+// todo 逻辑上的第一个索引是 lastTrimmedindex+ 1
+func (lm *LogManager) FirstIndex() int {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	if len(lm.logs) == 0 {
+		// 如果日志为空，则返回修剪后的下一个索引
+		return lm.lastTrimmedIndex + 1
+	}
+
+	// 否则返回日志数组中第一个条目的索引
+	return lm.lastTrimmedIndex + 1
+}
+
 // LastIndex returns the index of the last log entry.
 func (lm *LogManager) LastIndex() int {
 	lm.mu.Lock()

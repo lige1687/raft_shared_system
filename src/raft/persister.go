@@ -9,7 +9,11 @@ package raft
 // test with the original before submitting.
 //
 
-import "sync"
+import (
+	"log"
+	"os"
+	"sync"
+)
 
 // 存放了raft 的持久化状态
 type Persister struct {
@@ -31,6 +35,42 @@ func clone(orig []byte) []byte {
 	x := make([]byte, len(orig))
 	copy(x, orig)
 	return x
+}
+
+// todo实现可能涉及的文件或者磁盘存储
+func (p *Persister) SaveStateAndSnapshot(state []byte, snapshot []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// 更新内存中的状态和快照
+	p.raftstate = clone(state)
+	p.snapshot = clone(snapshot)
+
+	// 将状态和快照写入磁盘（假设文件存储路径为 raft_state 和 snapshot）
+	err := writeToFile("raft_state", p.raftstate)
+	if err != nil {
+		log.Fatalf("Failed to save raft state: %v", err)
+	}
+
+	err = writeToFile("snapshot", p.snapshot)
+	if err != nil {
+		log.Fatalf("Failed to save snapshot: %v", err)
+	}
+}
+
+func writeToFile(filename string, data []byte) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = file.Write(data)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // 复制一个persister

@@ -426,15 +426,23 @@ func (rf *Raft) kickOffElection() {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	snapshotIndex := rf.getFirstLog().Index
+	// snapshotIndex := rf.getFirstLog().Index
+	snapshotIndex := rf.lm.FirstIndex()
 	if index <= snapshotIndex {
 		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
 		return
 	}
-	rf.logs = shrinkEntriesArray(rf.logs[index-snapshotIndex:])
-	rf.logs[0].Command = nil
+	// trim 目录， 只保留到指定的index开始的日志
+	//rf.lm.logs = shrinkEntriesArray(rf.logs[index-snapshotIndex:])
+	rf.lm.logs = rf.lm.logs[index-snapshotIndex:]
+
+	rf.lm.logs[0].Command = nil
 	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
 	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, snapshotIndex)
+}
+func (rf *Raft) encodeState() []byte {
+	// 将 Raft 的状态序列化为 []byte
+	return []byte(fmt.Sprintf("%d:%d:%d", rf.currentTerm, rf.votedFor, rf.commitIndex))
 }
 
 // todo trim
