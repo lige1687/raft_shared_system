@@ -10,6 +10,7 @@ import (
 type LogEntry struct {
 	Term    int         // 任期号
 	Command interface{} // 客户端命令
+	Index   int
 }
 
 // LogManager handles log entries and related operations.
@@ -25,6 +26,21 @@ type LogManager struct {
 	persister *Persister // 持久化管理器
 }
 
+// matchLog checks if the log entry at PrevLogIndex matches PrevLogTerm.
+// It returns true if the log entry exists and matches the term; otherwise, false.
+func (lm *LogManager) matchLog(prevLogTerm int, prevLogIndex int) bool {
+	// 检查指定的索引是否在当前日志范围内
+	if prevLogIndex < 1 || prevLogIndex > lm.len() {
+		return false // 如果索引无效，返回 false
+	}
+
+	// 获取指定索引位置的日志条目
+	entry := lm.GetEntry(prevLogIndex)
+
+	// 检查日志条目的任期是否匹配
+	return entry.Term == prevLogTerm
+}
+
 // NewLogManager creates a new LogManager.
 func NewLogManager(persister *Persister) *LogManager {
 	lm := &LogManager{
@@ -35,13 +51,14 @@ func NewLogManager(persister *Persister) *LogManager {
 	return lm
 }
 
-// AppendEntry appends a new log entry to the log.
-func (lm *LogManager) AppendEntry(term int, command interface{}) {
+// AppendEntry appends a new log entry to the log., 并且返回这个entry
+func (lm *LogManager) AppendEntry(term int, command interface{}) LogEntry {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	entry := LogEntry{Term: term, Command: command}
 	lm.logs = append(lm.logs, entry)
 	lm.persist()
+	return entry
 }
 
 // GetEntry returns the log entry at a specific index.
@@ -124,7 +141,8 @@ func (lm *LogManager) getEntriesFrom(nextIndex int) []*LogEntry {
 	return result
 }
 
-// todo 逻辑上的第一个索引是 lastTrimmedindex+ 1
+// FirstIndex 逻辑上的第一个索引是 lastTrimmedindex+ 1, 逻辑, 而非物理, 注意了 !
+// 其实 logentry 里边的 index 也可以用来干这个, 不过你知道逻辑和物理的区别也可以
 func (lm *LogManager) FirstIndex() int {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
@@ -143,7 +161,7 @@ func (lm *LogManager) LastIndex() int {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	return lm.lastTrimmedIndex + len(lm.logs) - 1
-	// 返回逻辑长度, last
+	// 返回逻辑长度!!!
 }
 
 // LastTerm returns the term of the last log entry.
