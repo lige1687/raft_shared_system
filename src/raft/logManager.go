@@ -6,6 +6,14 @@ import (
 	"sync"
 )
 
+func mergeAndDereference(logs []LogEntry, entries []*LogEntry) []LogEntry {
+	// 遍历 entries 数组，解引用每个指针并追加到 logs 数组
+	for _, entry := range entries {
+		logs = append(logs, *entry) // 解引用 entry，并将其追加到 logs 中
+	}
+	return logs
+}
+
 // LogEntry represents a single log entry in Raft.
 type LogEntry struct {
 	Term    int         // 任期号
@@ -139,6 +147,23 @@ func (lm *LogManager) getEntriesFrom(nextIndex int) []*LogEntry {
 	}
 
 	return result
+}
+
+// 注意 物理上的长度和逻辑的区别, 即 distance , 即 逻辑要减的快照索引- 实际内存中第一个日志的 逻辑索引= 物理内存上的logs 的索引
+// 这里的snapshotindex即 要裁剪到的索引, 即这个逻辑索引前都得没有
+func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
+	if len(logs) == 0 {
+		return logs // 如果没有日志条目，直接返回原日志切片
+	}
+
+	// 计算从 snapshotIndex + 1 开始的日志条目
+	// 如果 snapshotIndex >= logs[0].Index，那么所有日志都已被裁剪( 因为全包含了
+	if snapshotIndex >= logs[len(logs)-1].Index {
+		return []LogEntry{} // 如果快照包含了所有日志，返回空切片
+	}
+
+	// 保留 snapshotIndex 之后的日志条目
+	return logs[snapshotIndex+1:]
 }
 
 // FirstIndex 逻辑上的第一个索引是 lastTrimmedindex+ 1, 逻辑, 而非物理, 注意了 !

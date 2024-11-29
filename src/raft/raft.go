@@ -409,14 +409,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 	// snapshotIndex := rf.getFirstLog().Index
 	snapshotIndex := rf.lm.FirstIndex()
+	// 第一个log 的逻辑日志, 即在内存中的 第一个log 的逻辑index
 	if index <= snapshotIndex {
 		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
 		return
 	}
-	// trim 目录， 只保留到指定的index开始的日志
-	// todo 实现shrink 函数
-	rf.lm.logs = shrinkEntriesArray(rf.lm.logs[index-snapshotIndex:])
+	// trim 目录， 移除快照之前的 日志条目
+	// index - 第一个内存中的index 才是 logs数组中的索引
+	rf.lm.logs = shrinkEntriesArray(rf.lm.logs, index) // 结果重新赋值给 lm的logs
 	rf.lm.logs[0].Command = nil
+	// 更新 snapshot 的状态, 等
 	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
 	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, snapshotIndex)
 }
@@ -426,32 +428,32 @@ func (rf *Raft) encodeState() []byte {
 	return []byte(fmt.Sprintf("%d:%d:%d", rf.currentTerm, rf.votedFor, rf.commitIndex))
 }
 
-// todo trim
-func (rf *Raft) trim(index int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// 确保 trim 的索引是合法的
-	if index <= rf.lm.lastTrimmedIndex {
-		return // 如果裁剪索引已经被裁剪过，直接返回
-	}
-
-	// 裁剪日志
-	relativeIndex := index - rf.lm.lastTrimmedIndex - 1
-	if relativeIndex >= len(rf.lm.logs) {
-		// 如果要裁剪的范围大于日志数组，清空日志
-		rf.lm.logs = nil
-	} else {
-		// 从裁剪点之后的日志开始保留
-		rf.lm.logs = rf.lm.logs[relativeIndex:]
-	}
-
-	// 更新最后裁剪的索引
-	rf.lm.lastTrimmedIndex = index
-
-	// 持久化裁剪后的状态
-	rf.persist()
-}
+// trim, 实际实现的是shrink array 的任务 ...
+//func (rf *Raft) trim(index int) {
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//
+//	// 确保 trim 的索引是合法的
+//	if index <= rf.lm.lastTrimmedIndex {
+//		return // 如果裁剪索引已经被裁剪过，直接返回
+//	}
+//
+//	// 裁剪日志
+//	relativeIndex := index - rf.lm.lastTrimmedIndex - 1
+//	if relativeIndex >= len(rf.lm.logs) {
+//		// 如果要裁剪的范围大于日志数组，清空日志
+//		rf.lm.logs = nil
+//	} else {
+//		// 从裁剪点之后的日志开始保留
+//		rf.lm.logs = rf.lm.logs[relativeIndex:]
+//	}
+//
+//	// 更新最后裁剪的索引
+//	rf.lm.lastTrimmedIndex = index
+//
+//	// 持久化裁剪后的状态
+//	rf.persist()
+//}
 
 // RequestVoteArgs example RequestVote RPC arguments structure.
 // field names must start with capital letters !
@@ -910,11 +912,12 @@ func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
 }
 
 type InstallSnapshotRequest struct {
-	Term          int    // 当前请求的任期
-	LeaderID      int    // 领导者的节点 ID
-	SnapshotIndex int    // 快照的索引
-	SnapshotTerm  int    // 快照的任期
-	SnapshotData  []byte // 快照数据
+	Term     int // 当前请求的任期
+	LeaderID int // 领导者的节点 ID
+
+	SnapshotData      []byte
+	LastIncludedTerm  int
+	LastIncludedIndex int // 快照包含的最后一个日志的信息
 }
 
 type InstallSnapshotResponse struct {
@@ -925,11 +928,11 @@ type InstallSnapshotResponse struct {
 // 生成 安装快照请求
 func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest {
 	return &InstallSnapshotRequest{
-		Term:          rf.currentTerm,                         // 当前任期
-		LeaderID:      rf.me,                                  // 领导者 ID
-		SnapshotIndex: rf.lm.LastIndex(),                      // 快照的索引
-		SnapshotTerm:  rf.lm.GetEntry(rf.lm.LastIndex()).Term, // 快照的任期
-		SnapshotData:  rf.persister.snapshot,                  // 快照数据
+		Term:              rf.currentTerm,                         // 当前任期
+		LeaderID:          rf.me,                                  // 领导者 ID
+		LastIncludedIndex: rf.lm.LastIndex(),                      // 快照的索引
+		LastIncludedTerm:  rf.lm.GetEntry(rf.lm.LastIndex()).Term, // 快照的任期
+		SnapshotData:      rf.persister.snapshot,                  // 快照数据
 	}
 }
 
@@ -937,6 +940,41 @@ func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest {
 func (rf *Raft) sendInstallSnapshot(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
 	// 假设发送请求到 peer
 	return rf.peers[peer].Call("Raft.InstallSnapshot", request, response)
+}
+
+// InstallSnapshot follower处理leader发来的 安装快照的请求
+func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing InstallSnapshotRequest %v and reply InstallSnapshotResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
+
+	response.Term = rf.currentTerm
+
+	if request.Term < rf.currentTerm {
+		return
+	}
+
+	if request.Term > rf.currentTerm {
+		rf.currentTerm, rf.votedFor = request.Term, -1
+		rf.persist()
+	}
+
+	rf.ChangeState(FOLLOWER)
+	rf.electionTimer.Reset(RandomizedElectionTimeout())
+
+	// outdated snapshot
+	if request.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      request.SnapshotData,
+			SnapshotTerm:  request.LastIncludedTerm,
+			SnapshotIndex: request.LastIncludedIndex,
+		}
+	}()
 }
 
 // genAppendEntriesRequest generates an AppendEntries request to send to a peer.
@@ -1015,7 +1053,7 @@ func (rf *Raft) handleAppendEntriesResponse(peer int, request *AppendEntriesArgs
 			//match是 追随者同步的最大索引位置
 			// 而 next是要发送的下一个索引的位置, 即match 的下一个咯
 			rf.nextIndexes[peer] = rf.matchIndexes[peer] + 1
-			rf.advanceCommitIndexForLeader() //todo   推进leader 的 commitindex (
+			rf.advanceCommitIndexForLeader() // 推进leader 的 commitindex ( 根据follower
 		} else {
 			//失败的follower ae response , leader要检查哪里有问题
 			// 有可能是自己不再是leader了, 所以检查一下是否有新的 leader , 即term 的检查
@@ -1068,8 +1106,8 @@ func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshot
 
 	// 如果响应成功，更新该 peer 的 matchIndex 和 nextIndex
 	if response.Success {
-		rf.matchIndexes[peer] = request.SnapshotIndex
-		rf.nextIndexes[peer] = request.SnapshotIndex + 1
+		rf.matchIndexes[peer] = request.LastIncludedIndex
+		rf.nextIndexes[peer] = request.LastIncludedIndex + 1
 		rf.applyCond.Signal() // 唤醒 apply goroutine，应用新的快照
 	} else {
 		// 处理失败的响应，通常会进行重试或调整 nextIndex
@@ -1077,9 +1115,10 @@ func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshot
 	}
 }
 
-// advanceCommitIndexForLeader 推进 commitindex, 确定哪些日志 可以提交和应用到状态机(多半数提交
+// advanceCommitIndexForLeader 推进 leader  的 commitindex, 确定哪些日志 可以提交和应用到状态机(多半数提交
 // 更新 commitindex给leader( 需要一个手段去通知leader, 自己的提交的index , 来帮助 leader判断一些半数情况
 // 根据 follower 的进度来更新leader 中的matchindex , 并且使得leader 来 确定哪些 日志可以提交, 即更新leader 的 commit index
+// leader 的commitindex是 半数以上的结果, 需要去访问所有的节点达到共识
 func (rf *Raft) advanceCommitIndexForLeader() {
 	// 获取当前日志的最后一个索引
 	lastIndex := rf.lm.LastIndex()
@@ -1106,6 +1145,20 @@ func (rf *Raft) advanceCommitIndexForLeader() {
 
 	// 打印调试信息
 	DPrintf("{Node %v} advanced commitIndex to %v", rf.me, rf.commitIndex)
+}
+
+// 根据leader 的 commit 值, 更新 当前follower 的 commitindex , 确保 fo 的节点提交不落后于 leader
+func (rf *Raft) advanceCommitIndexForFollower(leaderCommit int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 更新 commitIndex 使其不超过 leaderCommit 和当前日志的长度
+	// 1. leaderCommit 必须大于当前 commitIndex 才能推进
+	// 2. 新的 commitIndex 不能超过当前日志的最大索引
+	if leaderCommit > rf.commitIndex {
+		rf.commitIndex = min(leaderCommit, rf.lm.LastIndex()) // 确保 commitIndex 不会超过当前日志的最后一个索引
+		rf.applyCond.Signal()                                 // 通知 apply 进程处理提交的日志( 因为此时commitindex更新了, 可以去apply了, 所以唤醒
+	}
 }
 
 // a dedicated applier goroutine to guarantee that 保证每个日志会被放到applych 一次
@@ -1253,9 +1306,25 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	}
 
 	firstIndex := rf.lm.FirstIndex()
+	// 找到第一个物理内存中的日志的index
+	// 找到leader发来的所有 单独的日志
+
 	for index, entry := range request.Entries {
-		if entry.Index-firstIndex >= len(rf.lm.logs) || rf.lm.logs[entry.Index-firstIndex].Term != entry.Term {
-			rf.lm.logs = shrinkEntriesArray(append(rf.lm.logs[:entry.Index-firstIndex], request.Entries[index:]...))
+
+		//检查 leader发来的所有的 日志, 他是否都在 当前follower 的 内存里边
+		relativePosition := entry.Index - firstIndex
+		// 如果 相对位置超过了 内存长度, 说明太长了, 说明leader需要覆盖一些 follower 的数据
+		// 或者term不匹配,  说明日志冲突, 也是要覆盖 ,  此时需要裁剪并且添加新的 日志条目
+		// 不仅要检查 index, 还要检查term ! 才能唯一的确定一个日志 !
+		if relativePosition >= len(rf.lm.logs) || rf.lm.logs[relativePosition].Term != entry.Term {
+
+			//rf.lm.logs = shrinkEntriesArray(append(rf.lm.logs[relativePosition], request.Entries[index:]...))
+			//  找到需要覆盖的部分, 截取掉, 把后边不覆盖的部分继续append即可
+			rf.lm.logs = shrinkEntriesArray(rf.lm.logs[:relativePosition], entry.Index)
+			rf.lm.logs = mergeAndDereference(
+				rf.lm.logs,
+				request.Entries[index:],
+			)
 			break
 		}
 	}
