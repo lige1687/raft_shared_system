@@ -90,21 +90,21 @@ type Raft struct {
 	commitIndex int // 已提交的最大下标
 	lastApplied int // 以应用到状态机的最大下标( 提交和应用没是两回事
 
-	applyCh   chan ApplyMsg // apply通道 , 用于和peer交流
-	applyCond *sync.Cond    // apply协程唤醒条件  ,应该根据 mu 创建
-
-	installSnapCh chan int    // install snapshot的信号通道，传入trim index
-	backupApplied bool        // 宕机, 看是否有快照? 是否需要重新的apply
-	notTicking    chan bool   // 没有进行选举计时
-	electionTimer *time.Timer // 选举计时器
+	//installSnapCh chan int // install snapshot的信号通道，传入trim index
+	// backupApplied bool        // 宕机, 看是否有快照? 是否需要重新的apply
 
 	lastIncludedIndex interface{} // 最后一个包含快照里边的日志index
 	lastIncludedTerm  interface{}
 
 	// Leader特有字段
-	nextIndexes    []int        // 对于每个follower，leader要发送的下一个复制日志下标
-	matchIndexes   []int        // 已知每个follower和自己一致的最大日志下标
-	heartbeatTimer *time.Timer  // 心跳计时器
+	nextIndexes    []int       // 对于每个follower，leader要发送的下一个复制日志下标
+	matchIndexes   []int       // 已知每个follower和自己一致的最大日志下标
+	electionTimer  *time.Timer // 选举计时器
+	heartbeatTimer *time.Timer // 心跳计时器
+
+	applyCh   chan ApplyMsg // apply通道 , 用于和peer交流
+	applyCond *sync.Cond    // apply协程唤醒条件  ,应该根据 mu 创建
+
 	replicatorCond []*sync.Cond // 去管理每个 fo 的复制状态? 去通知每个fo的复制器 的等待条件
 
 	// 待定是否需要
@@ -209,64 +209,63 @@ func (rf *Raft) GetState() (int, bool) {
 
 // restore previously persisted state.
 
-// todo heartbeat, 其实是一个广播行为,
-
-func (rf *Raft) sendHeartbeats() {
-	total := len(rf.peers)
-	args := AppendEntriesArgs{}
-	args.Term = rf.currentTerm
-	args.LeaderId = rf.me
-	args.LeaderCommit = rf.commitIndex
-	// 和论文设计的一样, follower会检查prev 的index和 term是否对的上? 对的上说明我们同步
-	//对不上, 说明需要同步, 需要找到到底哪个开始缺了, 一致性检查
-	// 注意 边界条件判断, 即 leader当前 的两prev 的取值如何? 逻辑地址? lastTrimmedIndex ?
-	if rf.lm.len() >= 1 {
-		// len返回的是逻辑长度 , 而不是实际长度, 实际长度通过 len logs返回哦
-		args.PrevLogIndex = rf.lm.len()
-		if args.PrevLogIndex > rf.lm.lastTrimmedIndex {
-			// 表示内存里边有日志的
-			args.PrevLogTerm = rf.lm.LastTerm()
-		} else { // 否则说明 已有的都被 放到snapshot里边了, 直接用trim 的即可
-
-			args.PrevLogTerm = rf.lm.lastTrimmedTerm
-			args.PrevLogIndex = rf.lm.lastTrimmedIndex
-		}
-
-	}
-
-	rf.mu.Lock()
-	// 如果当前没被kill并且还是leader , 就继续发送心跳
-	for i := 0; !rf.killed() && i < total && rf.state == LEADER; i++ {
-		if i != rf.me { // 发送心跳给所有的, 通过routine 并发的发
-			go func(server int) {
-				reply := AppendEntriesReply{} // 准备构造 返回结果
-				if reply.XTerm > rf.currentTerm {
-					//心跳实际是 一个双向交通信息的过程
-					// 其他节点必自己高, 自己就变为follower ,更新自己的term
-					rf.enterNewTerm(reply.Term)
-					rf.resetElectionTimer() // 重置选举器
-					return
-				}
-
-				if !reply.Success {
-					//此时说明出现了日志的不一致 ,先 快速备份第一次, 找到 下一个term位置, 进行一次的
-					rf.fastBackup(server, reply)             // 快速恢复
-					rf.agreement(server, rf.lm.len(), false) //同步的过程
-					//从最新的位置检查一致性
-				} else {
-					// 更新一致的位置, 维护 数组
-					rf.mu.Lock()
-					rf.nextIndexes[server] = args.PrevLogIndex + 1 // 这个fo下一个index的索引位置
-					rf.matchIndexes[server] = args.PrevLogIndex    // 当前fo和自己同步的位置
-					rf.mu.Unlock()
-					rf.tryCommit() // 每次心跳后检查都能进行提交
-				}
-			}(i) // 遍历每一个发送的对象, 即server peer
-
-		}
-	}
-
-}
+//
+//func (rf *Raft) sendHeartbeats() {
+//	total := len(rf.peers)
+//	args := AppendEntriesArgs{}
+//	args.Term = rf.currentTerm
+//	args.LeaderId = rf.me
+//	args.LeaderCommit = rf.commitIndex
+//	// 和论文设计的一样, follower会检查prev 的index和 term是否对的上? 对的上说明我们同步
+//	//对不上, 说明需要同步, 需要找到到底哪个开始缺了, 一致性检查
+//	// 注意 边界条件判断, 即 leader当前 的两prev 的取值如何? 逻辑地址? lastTrimmedIndex ?
+//	if rf.lm.len() >= 1 {
+//		// len返回的是逻辑长度 , 而不是实际长度, 实际长度通过 len logs返回哦
+//		args.PrevLogIndex = rf.lm.len()
+//		if args.PrevLogIndex > rf.lm.lastTrimmedIndex {
+//			// 表示内存里边有日志的
+//			args.PrevLogTerm = rf.lm.LastTerm()
+//		} else { // 否则说明 已有的都被 放到snapshot里边了, 直接用trim 的即可
+//
+//			args.PrevLogTerm = rf.lm.lastTrimmedTerm
+//			args.PrevLogIndex = rf.lm.lastTrimmedIndex
+//		}
+//
+//	}
+//
+//	rf.mu.Lock()
+//	// 如果当前没被kill并且还是leader , 就继续发送心跳
+//	for i := 0; !rf.killed() && i < total && rf.state == LEADER; i++ {
+//		if i != rf.me { // 发送心跳给所有的, 通过routine 并发的发
+//			go func(server int) {
+//				reply := AppendEntriesReply{} // 准备构造 返回结果
+//				if reply.XTerm > rf.currentTerm {
+//					//心跳实际是 一个双向交通信息的过程
+//					// 其他节点必自己高, 自己就变为follower ,更新自己的term
+//					rf.enterNewTerm(reply.Term)
+//					rf.resetElectionTimer() // 重置选举器
+//					return
+//				}
+//
+//				if !reply.Success {
+//					//此时说明出现了日志的不一致 ,先 快速备份第一次, 找到 下一个term位置, 进行一次的
+//					rf.fastBackup(server, reply)             // 快速恢复
+//					rf.agreement(server, rf.lm.len(), false) //同步的过程
+//					//从最新的位置检查一致性
+//				} else {
+//					// 更新一致的位置, 维护 数组
+//					rf.mu.Lock()
+//					rf.nextIndexes[server] = args.PrevLogIndex + 1 // 这个fo下一个index的索引位置
+//					rf.matchIndexes[server] = args.PrevLogIndex    // 当前fo和自己同步的位置
+//					rf.mu.Unlock()
+//					rf.tryCommit() // 每次心跳后检查都能进行提交
+//				}
+//			}(i) // 遍历每一个发送的对象, 即server peer
+//
+//		}
+//	}
+//
+//}
 
 // 快速的定位到不一致的term和index, 并且重置 leader中维护的 每个fo对应的index的数组
 // 可能需要多次调用 这个 方法去找到 最终的term
@@ -300,39 +299,40 @@ func (rf *Raft) fastBackup(server int, reply AppendEntriesReply) {
 	}
 }
 
-// todo, 实现的完善, aggrement
-
-func (rf *Raft) agreement(server int, nextIndex int, isHeartbeat bool) {
-	for {
-		rf.mu.Lock()
-		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: nextIndex - 1,
-			PrevLogTerm:  rf.lm.GetEntry(nextIndex - 1).Term,
-			Entries:      rf.lm.getEntriesFrom(nextIndex),
-			LeaderCommit: rf.commitIndex,
-		}
-		rf.mu.Unlock()
-
-		reply := AppendEntriesReply{}
-		if !rf.sendAppendEntries(server, &args, &reply) {
-			break // 如果 RPC 失败，则退出
-		}
-
-		if reply.Success {
-			rf.mu.Lock()
-			rf.nextIndexes[server] = nextIndex + len(args.Entries)
-			rf.matchIndexes[server] = nextIndex + len(args.Entries) - 1
-			rf.mu.Unlock()
-			rf.tryCommit()
-			break // 日志同步成功，退出循环
-		} else {
-			rf.fastBackup(server, reply)
-			nextIndex = rf.nextIndexes[server] // 更新 nextIndex
-		}
-	}
-}
+//
+////
+//
+//func (rf *Raft) agreement(server int, nextIndex int, isHeartbeat bool) {
+//	for {
+//		rf.mu.Lock()
+//		args := AppendEntriesArgs{
+//			Term:         rf.currentTerm,
+//			LeaderId:     rf.me,
+//			PrevLogIndex: nextIndex - 1,
+//			PrevLogTerm:  rf.lm.GetEntry(nextIndex - 1).Term,
+//			Entries:      rf.lm.getEntriesFrom(nextIndex),
+//			LeaderCommit: rf.commitIndex,
+//		}
+//		rf.mu.Unlock()
+//
+//		reply := AppendEntriesReply{}
+//		if !rf.sendAppendEntries(server, &args, &reply) {
+//			break // 如果 RPC 失败，则退出
+//		}
+//
+//		if reply.Success {
+//			rf.mu.Lock()
+//			rf.nextIndexes[server] = nextIndex + len(args.Entries)
+//			rf.matchIndexes[server] = nextIndex + len(args.Entries) - 1
+//			rf.mu.Unlock()
+//			rf.tryCommit()
+//			break // 日志同步成功，退出循环
+//		} else {
+//			rf.fastBackup(server, reply)
+//			nextIndex = rf.nextIndexes[server] // 更新 nextIndex
+//		}
+//	}
+//}
 
 //	rf.mu.Lock()
 //
@@ -472,7 +472,7 @@ type RequestVoteReply struct {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -527,8 +527,6 @@ func (rf *Raft) killed() bool {
 
 // 当一个raft节点产生的,时候, 就需要定期的去检查是否需要 重新选举? 即是否有leader
 func (rf *Raft) ticker() {
-	// 初始化 electionTimer
-	rf.resetElectionTimer()
 
 	for rf.killed() == false {
 		select {
@@ -539,12 +537,14 @@ func (rf *Raft) ticker() {
 			// 选举超时处理
 			rf.mu.Lock()
 			if rf.state != LEADER { // 只有 FOLLOWER 或 CANDIDATE 状态才需要重新选举
-				rf.kickOffElection()
+				// todo  对于candidate需要做什么?
+				rf.ChangeState(CANDIDATE)
+				rf.StartElection()
 			}
-			rf.mu.Unlock()
-
 			// 重置选举计时器
 			rf.resetElectionTimer()
+
+			rf.mu.Unlock()
 
 		case <-rf.heartbeatTimer.C:
 			// 即 心跳超时,leader  此时需要重新发送 心跳 , leader独有的 心跳timer( 需要定期的发送心跳
@@ -552,87 +552,103 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			if rf.state == LEADER {
 				rf.BroadcastHeartbeat(true) // Leader 定期发送心跳
+				// 重置心跳计时器
+				rf.resetHeartbeatTimer()
 			}
 			rf.mu.Unlock()
 
-			// 重置心跳计时器
-			rf.resetHeartbeatTimer()
 		}
 	}
 }
-
-// 超时选举实现
-func (rf *Raft) kickOffElection() {
-	rf.currentTerm++
-	rf.state = CANDIDATE
-	rf.votedFor = rf.me // candidate id
-	rf.persist()        // 将当前的持久化状态持久化 ! 防止宕机导致的不一致
-	votes := 1
-	total := len(rf.peers)
-	args := rf.getRequestVoteArgs() // 获取 请求的content  , 即创建请求的方法
-	mu := sync.Mutex{}
-	for i := 0; i < total; i++ {
-		//
-		if i == rf.me {
-			continue
+func (rf *Raft) StartElection() {
+	request := rf.getRequestVoteArgs()
+	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, request)
+	// use Closure
+	grantedVotes := 1
+	rf.votedFor = rf.me
+	rf.persist()
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue //跳过自己
 		}
-		// 使用goroutine去 投票, 并发的,
-		// 将 server传入, 表示是发给 谁的 ? 对应参数i,  即每个 server都会给你发一个则更好
-		go func(server int) {
-			reply := RequestVoteReply{}
-			if !rf.sendRequestVote(server, &args, &reply) {
-				return
-			}
-			if args.Term == rf.currentTerm && rf.state == CANDIDATE {
-				// 判断防止自己身份已经改变, 并且判断term 是否和自己是一个
-				if reply.Term < rf.currentTerm {
-					// 投票者日期小于自己, 丢弃
-					return
-				}
-				if reply.VoteGranted {
-					//如果确认给自己投票
-					mu.Lock()
-					votes++
-					if rf.state != LEADER && votes > total/2 {
-						// 超过半数, 并且当前不是leader  !
-						rf.initLeader() // 初始化一些leader 才有的信息
-						rf.state = LEADER
-						// 立刻开始心跳, 告诉所有的 节点我是leader了
-						go rf.sendHeartbeats()
+		go func(peer int) {
+			response := new(RequestVoteReply)
+			// 对于每一个同类, 发送请求
+			if rf.sendRequestVote(peer, request, response) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, response, peer, request, rf.currentTerm)
+				if rf.currentTerm == request.Term && rf.state == CANDIDATE {
+					if response.VoteGranted { // 确保投给我了
+						grantedVotes += 1
+						if grantedVotes > len(rf.peers)/2 { // 超过半数, 开始
+							DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
+
+							rf.initLeader(LEADER)
+							// 发送心跳
+							rf.BroadcastHeartbeat(true)
+						}
+					} else if response.Term > rf.currentTerm { // 人家比你还大, 回去吧你
+						DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, response.Term, rf.currentTerm)
+						rf.ChangeState(FOLLOWER)
+						rf.currentTerm, rf.votedFor = response.Term, -1
+						rf.persist()
 					}
-
-					mu.Unlock()
 				}
 			}
-		}(i)
-
+		}(peer)
 	}
 }
 
-func (rf *Raft) resetElectionTimer() {
-	timeout := randomElectionTimeout()
-	if rf.electionTimer == nil {
-		rf.electionTimer = time.NewTimer(timeout)
-	} else {
-		rf.electionTimer.Reset(timeout)
-	}
-}
+//// 超时选举实现
+//func (rf *Raft) kickOffElection() {
+//	rf.currentTerm++
+//	rf.state = CANDIDATE
+//	rf.votedFor = rf.me // candidate id
+//	rf.persist()        // 将当前的持久化状态持久化 ! 防止宕机导致的不一致
+//	votes := 1
+//	total := len(rf.peers)
+//	args := rf.getRequestVoteArgs() // 获取 请求的content  , 即创建请求的方法
+//	mu := sync.Mutex{}
+//	for i := 0; i < total; i++ {
+//		//
+//		if i == rf.me {
+//			continue
+//		}
+//		// 使用goroutine去 投票, 并发的,
+//		// 将 server传入, 表示是发给 谁的 ? 对应参数i,  即每个 server都会给你发一个则更好
+//		go func(server int) {
+//			reply := RequestVoteReply{}
+//			if !rf.sendRequestVote(server, &args, &reply) {
+//				return
+//			}
+//			if args.Term == rf.currentTerm && rf.state == CANDIDATE {
+//				// 判断防止自己身份已经改变, 并且判断term 是否和自己是一个
+//				if reply.Term < rf.currentTerm {
+//					// 投票者日期小于自己, 丢弃
+//					return
+//				}
+//				if reply.VoteGranted {
+//					//如果确认给自己投票
+//					mu.Lock()
+//					votes++
+//					if rf.state != LEADER && votes > total/2 {
+//						// 超过半数, 并且当前不是leader  !
+//						rf.initLeader() // 初始化一些leader 才有的信息
+//						rf.state = LEADER
+//						// 立刻开始心跳, 告诉所有的 节点我是leader了
+//						go rf.BroadcastHeartbeat(true)
+//					}
+//
+//					mu.Unlock()
+//				}
+//			}
+//		}(i)
+//
+//	}
+//}
 
-// 重置 心跳
-func (rf *Raft) resetHeartbeatTimer() {
-	if rf.heartbeatTimer == nil {
-		rf.heartbeatTimer = time.NewTimer(100 * time.Millisecond)
-	} else {
-		rf.heartbeatTimer.Reset(100 * time.Millisecond)
-	}
-}
-
-// 生成一个随机的选举超时时间（例如 150 到 300 毫秒之间）
-func randomElectionTimeout() time.Duration {
-	return time.Duration(150+rand.Intn(150)) * time.Millisecond
-}
-
-// RequestVote  收到投票请求后的处理 handler
+// RequestVote  todo 收到投票请求后的处理 handler
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term >= rf.currentTerm {
 		// 至少任期持平才会 进行下一步
@@ -755,7 +771,7 @@ type AppendEntriesReply struct {
 }
 
 // 初始化leader, 一些leader才有的属性
-func (rf *Raft) initLeader() {
+func (rf *Raft) initLeader(RaftState) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// 因为要访问 shared
@@ -784,7 +800,7 @@ func (rf *Raft) initLeader() {
 		rf.electionTimer.Stop() // Stop election timer for the leader
 	}
 
-	rf.resetHeartbeatTimer()
+	// rf.resetHeartbeatTimer()
 
 	// 别忘记leader开始发送心跳,不过不是这个函数的功能
 }
@@ -816,20 +832,27 @@ func (rf *Raft) tryCommit() {
 	rf.mu.Unlock()
 }
 
-const (
-	HeartbeatTimeout = 125
-	ElectionTimeout  = 1000
-)
-
-func StableHeartbeatTimeout() time.Duration {
-	return time.Duration(HeartbeatTimeout) * time.Millisecond
+func (rf *Raft) resetElectionTimer() {
+	timeout := randomElectionTimeout()
+	if rf.electionTimer == nil {
+		rf.electionTimer = time.NewTimer(timeout)
+	} else {
+		rf.electionTimer.Reset(timeout)
+	}
 }
 
-// global 应该是 随机产生的？还是论文给的，。。
-var globalRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+// 重置 心跳
+func (rf *Raft) resetHeartbeatTimer() {
+	if rf.heartbeatTimer == nil {
+		rf.heartbeatTimer = time.NewTimer(50 * time.Millisecond)
+	} else {
+		rf.heartbeatTimer.Reset(50 * time.Millisecond)
+	}
+}
 
-func RandomizedElectionTimeout() time.Duration {
-	return time.Duration(ElectionTimeout+globalRand.Intn(ElectionTimeout)) * time.Millisecond
+// 生成一个随机的选举超时时间（例如 150 到 300 毫秒之间）
+func randomElectionTimeout() time.Duration {
+	return time.Duration(150+rand.Intn(150)) * time.Millisecond
 }
 
 // Make the service or tester wants to create a Raft server. the ports
@@ -846,6 +869,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{
 		peers:          peers,
 		persister:      persister,
+		commitIndex:    0,
 		me:             me,
 		dead:           0,
 		applyCh:        applyCh,
@@ -859,10 +883,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			lastTrimmedTerm:  0,
 			persister:        persister,
 		},
-		nextIndexes:    make([]int, len(peers)),
-		matchIndexes:   make([]int, len(peers)),
-		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()),    // 固定心跳, 时间是多少来着, 10s ?
-		electionTimer:  time.NewTimer(RandomizedElectionTimeout()), // 随机 选举时长,todo时长还没确定
+		nextIndexes:       make([]int, len(peers)),
+		matchIndexes:      make([]int, len(peers)),
+		heartbeatTimer:    time.NewTimer(50 * time.Millisecond),   // 固定心跳, 时间是多少来着, 10s ?,,
+		electionTimer:     time.NewTimer(randomElectionTimeout()), // 随机 选举时长,todo时长还没确定
+		lastIncludedIndex: 0,
+		lastIncludedTerm:  -1,
 	}
 	// 在 崩溃后重新读取信息, 从持久化的介质
 	rf.readPersist(persister.ReadRaftState())
@@ -987,7 +1013,7 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *Insta
 
 	// 重置自己的选举, 因为自己得到了一个 认可的leader 的 请求, 需要维护自己的 follower状态
 	rf.ChangeState(FOLLOWER)
-	rf.electionTimer.Reset(RandomizedElectionTimeout())
+	rf.electionTimer.Reset(randomElectionTimeout())
 
 	// 如果是expired 的 snapshot , 则直接返回即可, 不需要应用
 	if request.LastIncludedIndex <= rf.commitIndex {
@@ -1149,7 +1175,7 @@ func (rf *Raft) handleAppendEntriesResponse(peer int, request *AppendEntriesArgs
 			}
 		}
 	}
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()))
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), rf.lastIncludedTerm, rf.lastIncludedIndex)
 }
 
 // handleInstallSnapshotResponse
@@ -1335,7 +1361,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	}
 
 	rf.ChangeState(FOLLOWER)
-	rf.electionTimer.Reset(RandomizedElectionTimeout())
+	rf.electionTimer.Reset(randomElectionTimeout())
 
 	// 若leader安装了snapshot，会出现rf.log.getFirstLog() > PrevLogIndex的情况。
 	if request.PrevLogIndex < rf.lm.FirstIndex() {
