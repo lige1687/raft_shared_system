@@ -754,7 +754,7 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-// todo , 初始化leader, 一些leader才有的属性
+// 初始化leader, 一些leader才有的属性
 func (rf *Raft) initLeader() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -768,6 +768,8 @@ func (rf *Raft) initLeader() {
 
 	// Set nextIndex to the index after the last log entry
 	lastLogIndex := rf.getLastLogIndex()
+
+	//更新两个数组, 反正后续会通过 心跳和一致性检查 进行维护的, 根据follower 的进度
 	for i := range rf.peers {
 		rf.nextIndexes[i] = lastLogIndex + 1
 		rf.matchIndexes[i] = 0
@@ -778,10 +780,13 @@ func (rf *Raft) initLeader() {
 		rf.heartbeatTimer.Stop()
 	}
 
+	if rf.electionTimer != nil {
+		rf.electionTimer.Stop() // Stop election timer for the leader
+	}
+
 	rf.resetHeartbeatTimer()
 
-	// 开始 发送心跳
-	go rf.sendHeartbeats()
+	// 别忘记leader开始发送心跳,不过不是这个函数的功能
 }
 
 // leader统计matchIndex，尝试提交 , 提交到本地
@@ -1411,13 +1416,9 @@ func (rf *Raft) ChangeState(newState RaftState) {
 		// 2. 清除投票信息，表示该节点不再参与当前选举
 		rf.votedFor = -1
 
-		// 3. 停止当前选举进程（如果有）
-		// 如果你在 Raft 实现中有正在进行的选举过程或相关的goroutine
-		// 你可能需要在这里取消它们，具体取决于你的实现方式
 	}
+	//其他的状态, 如 leader和leader 的初始化可以写在这里, initleader 等
 
-	// 其他状态转换可以在这里处理（例如从 Candidate 或 Leader 转换到 Follower）
-	// 对于 `FOLLOWER` 状态，通常我们不需要做额外的操作。
 }
 
 //// AppendEntries  follower 使用, 用来 处理日志同步( 即leader发来的请求 对xTerm等 进行一个操作 ,
