@@ -39,7 +39,6 @@ func clone(orig []byte) []byte {
 	return x
 }
 
-// todo实现可能涉及的文件或者磁盘存储
 func (p *Persister) SaveStateAndSnapshot(state []byte, snapshot []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

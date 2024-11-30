@@ -21,6 +21,7 @@ import (
 	"6.5840/labgob"
 	"bytes"
 	"fmt"
+	"log"
 	"math/rand"
 
 	"sync"
@@ -139,6 +140,22 @@ func (rf *Raft) persist() {
 	// 调用SaveRaftState()将编码后的字节数组传递给Persister
 	rf.persister.SaveRaftState(data)
 
+}
+
+// SaveRaftState 将 Raft 节点的状态保存到持久化存储
+func (p *Persister) SaveRaftState(state []byte) {
+	// 锁住操作，保证线程安全
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// 这里我们可以使用状态字节数组，进行持久化处理
+	p.raftstate = state
+
+	// 将状态写入文件系统或其他存储媒介
+	err := writeToFile("raft_state", p.raftstate)
+	if err != nil {
+		log.Fatalf("Failed to save raft state: %v", err)
+	}
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
@@ -420,7 +437,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lm.logs[0].Command = nil
 	// 更新 snapshot 的状态, 等
 	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, snapshotIndex)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), index, snapshotIndex)
 }
 
 func (rf *Raft) encodeState() []byte {
@@ -839,7 +856,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nextIndexes:    make([]int, len(peers)),
 		matchIndexes:   make([]int, len(peers)),
 		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()),    // 固定心跳, 时间是多少来着, 10s ?
-		electionTimer:  time.NewTimer(RandomizedElectionTimeout()), // 随机 选举时长
+		electionTimer:  time.NewTimer(RandomizedElectionTimeout()), // 随机 选举时长,todo时长还没确定
 	}
 	// 在 崩溃后重新读取信息, 从持久化的介质
 	rf.readPersist(persister.ReadRaftState())
@@ -865,6 +882,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 // 复制线程, 用于follower同步, leader调用, 去检查
+// 每个 fo有一个leader
 func (rf *Raft) replicator(peer int) {
 	rf.replicatorCond[peer].L.Lock()
 	// 获取对应fol 的锁
@@ -874,8 +892,9 @@ func (rf *Raft) replicator(peer int) {
 		// 如果不需要为这个 peer 复制条目，只要释放 CPU 并等待其他 goroutine 的信号，如果服务添加了新的命令
 		// 如果这个peer需要复制条目，这个goroutine会多次调用replicateOneRound(peer)直到这个peer赶上，然后等待
 		//不断的 追加使得 复制追上进度
+		// leader调用去检查是否一个节点需要复制
 		for !rf.needReplicating(peer) {
-			// 如果不需要复制, 就阻塞当前线程即可
+			// 如果不需要复制, 就阻塞当前线程即可, 直到被唤醒
 			rf.replicatorCond[peer].Wait()
 		}
 
@@ -886,10 +905,10 @@ func (rf *Raft) replicator(peer int) {
 	}
 }
 
-// 是否一个节点需要 复制?
+// 是否一个节点需要 复制? leader调用
 func (rf *Raft) needReplicating(peer int) bool {
 	rf.mu.RLock() // 只需要用到读锁
-	//
+	// 当前调用节点是leader才能 复制日志!
 	defer rf.mu.RUnlock()
 	return rf.state == LEADER && rf.matchIndexes[peer] < rf.lm.LastIndex()
 }
@@ -936,37 +955,40 @@ func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest {
 	}
 }
 
-// 发送安装snapshot请求
+// leader发送安装snapshot请求
 func (rf *Raft) sendInstallSnapshot(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
 	// 假设发送请求到 peer
 	return rf.peers[peer].Call("Raft.InstallSnapshot", request, response)
 }
 
-// InstallSnapshot follower处理leader发来的 安装快照的请求
+// InstallSnapshot follower处理leader发来的 安装快照的请求, 除了检查term外, 无条件的服从
 func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing InstallSnapshotRequest %v and reply InstallSnapshotResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
+	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing InstallSnapshotRequest %v and reply InstallSnapshotResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), request, response)
 
 	response.Term = rf.currentTerm
 
 	if request.Term < rf.currentTerm {
+		// 检查term
 		return
 	}
 
-	if request.Term > rf.currentTerm {
+	if request.Term > rf.currentTerm { // 更新自己的term
 		rf.currentTerm, rf.votedFor = request.Term, -1
 		rf.persist()
 	}
 
+	// 重置自己的选举, 因为自己得到了一个 认可的leader 的 请求, 需要维护自己的 follower状态
 	rf.ChangeState(FOLLOWER)
 	rf.electionTimer.Reset(RandomizedElectionTimeout())
 
-	// outdated snapshot
+	// 如果是expired 的 snapshot , 则直接返回即可, 不需要应用
 	if request.LastIncludedIndex <= rf.commitIndex {
 		return
 	}
 
+	// 否则将snapshot 信息放入applych, 等待异步的apply
 	go func() {
 		rf.applyCh <- ApplyMsg{
 			SnapshotValid: true,
@@ -975,6 +997,36 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *Insta
 			SnapshotIndex: request.LastIncludedIndex,
 		}
 	}()
+}
+
+// 服务端送来的请求, 你去处理
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex %v to check whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
+
+	// 和上述逻辑一样, 过期的则跳过
+	if lastIncludedIndex <= rf.commitIndex {
+		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger", rf.me, lastIncludedIndex, rf.commitIndex)
+		return false
+	}
+	// 如果不过期, 需要apply的话, 两种情况, 一种是超过了索引界限, 则直接置空内存里边的 slice即可, 此时的数据在snapshot里边, 注意保存snapshot 在本地哦
+
+	if lastIncludedIndex > rf.lm.LastIndex() {
+		rf.lm.logs = make([]LogEntry, 1)
+	} else { // rf.lm.logs[lastIncludedIndex-rf.getFirstLog().Index:]
+		relative := lastIncludedIndex - rf.lm.LastIndex()
+		rf.lm.logs = shrinkEntriesArray(rf.lm.logs, relative)
+		rf.lm.logs[0].Command = nil
+	}
+	// 维护此时的快照boundary, 即 lastIncluded
+	rf.lm.logs[0].Term, rf.lm.logs[0].Index = lastIncludedTerm, lastIncludedIndex
+	rf.lastApplied, rf.commitIndex = lastIncludedIndex, lastIncludedIndex
+
+	// 保持 snapshot 的状态
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), lastIncludedTerm, lastIncludedIndex)
+	return true
 }
 
 // genAppendEntriesRequest generates an AppendEntries request to send to a peer.
@@ -1091,7 +1143,7 @@ func (rf *Raft) handleAppendEntriesResponse(peer int, request *AppendEntriesArgs
 			}
 		}
 	}
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after handling AppendEntriesResponse %v for AppendEntriesRequest %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), response, request)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()))
 }
 
 // handleInstallSnapshotResponse
@@ -1191,6 +1243,8 @@ func (rf *Raft) applier() {
 		DPrintf("{Node %v} applies entries %v-%v in term %v", rf.me, rf.lastApplied, commitIndex, rf.currentTerm)
 		// 直接使用中jian变量是因为 如果通过rf调用 ,index可能随着时间而改变
 		// use Max(rf.lastApplied, commitIndex) rather than commitIndex directly to avoid concurrently InstallSnapshot rpc causing lastApplied to rollback
+		// 防止安装snapshot (强制性的) 导致 index回退, 选择更大的那个肯定没错, 因为已经applied 的状态无法倒退了
+
 		rf.lastApplied = max(rf.lastApplied, commitIndex)
 		rf.mu.Unlock()
 	}
@@ -1263,7 +1317,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
+	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), request, response)
 
 	if request.Term < rf.currentTerm {
 		response.Term, response.Success = rf.currentTerm, false
@@ -1280,7 +1334,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	// 若leader安装了snapshot，会出现rf.log.getFirstLog() > PrevLogIndex的情况。
 	if request.PrevLogIndex < rf.lm.FirstIndex() {
 		response.Term, response.Success = 0, false
-		DPrintf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v < firstLogIndex %v", rf.me, request, request.LeaderId, request.PrevLogIndex, rf.getFirstLog().Index)
+		DPrintf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v < firstLogIndex %v", rf.me, request, request.LeaderId, request.PrevLogIndex, rf.lm.GetEntry(rf.lm.FirstIndex()))
 		return
 	}
 	// 判断PrevLog存不存在
@@ -1453,7 +1507,6 @@ func min(a, b int) int {
 	return b
 }
 
-//// todo 异步的apply 的实现, raft 的fo节点去调用?
 //func (rf *Raft) apply() {
 //	// 先apply快照
 //	if rf.lm.lastTrimmedIndex != 0 {
