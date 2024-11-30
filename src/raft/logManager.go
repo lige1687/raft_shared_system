@@ -59,6 +59,8 @@ func NewLogManager(persister *Persister) *LogManager {
 	return lm
 }
 
+// 锁, 确保外部调用的时候有锁!
+//
 // AppendEntry appends a new log entry to the log., 并且返回这个entry
 func (lm *LogManager) AppendEntry(term int, command interface{}) LogEntry {
 	lm.mu.Lock()
@@ -169,8 +171,8 @@ func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
 // FirstIndex 逻辑上的第一个索引是 lastTrimmedindex+ 1, 逻辑, 而非物理, 注意了 !
 // 其实 logentry 里边的 index 也可以用来干这个, 不过你知道逻辑和物理的区别也可以
 func (lm *LogManager) FirstIndex() int {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 
 	if len(lm.logs) == 0 {
 		// 如果日志为空，则返回修剪后的下一个索引

@@ -39,9 +39,13 @@ func clone(orig []byte) []byte {
 	return x
 }
 
+// SaveStateAndSnapshot todo
+// Save both Raft state and K/V snapshot as a single atomic action,
+// to help avoid them getting out of sync.
 func (p *Persister) SaveStateAndSnapshot(state []byte, snapshot []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// 外层获取了锁, 内层就不能用获取了, 可重入锁!
 
 	// 更新内存中的状态和快照
 	p.raftstate = clone(state)
@@ -120,12 +124,30 @@ func (ps *Persister) SnapshotSize() int {
 	return len(ps.snapshot)
 }
 
+// SaveRaftState 将 Raft 节点的状态保存到持久化存储
+func (p *Persister) SaveRaftState(state []byte) {
+	// 锁住操作，保证线程安全
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// 这里我们可以使用状态字节数组，进行持久化处理
+	p.raftstate = state
+
+	// 将状态写入文件系统或其他存储媒介
+	err := writeToFile("raft_state", p.raftstate)
+	if err != nil {
+		log.Fatalf("Failed to save raft state: %v", err)
+	}
+}
+
 // restore previously persisted state.
 // 恢复之前的持久化状态（解码）
 // 传入的是一个byte数组，而ReadRaftState()返回的就是[]byte
 // 因此恢复持久化状态应该：
 // 1. data := rf.persister.ReadRaftState()
 // 2. rf.readPersist(data)
+
+// 此时不需要锁, 因为 根本不涉及并发的状态
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -143,6 +165,11 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	// 需要上锁, 并发的访问可能出现! 多线程同时访问一些内容
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm int
