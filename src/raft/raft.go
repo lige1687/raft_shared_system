@@ -369,54 +369,6 @@ func (rf *Raft) agreement(server int, nextIndex int, isHeartbeat bool) {
 //		}
 //	}
 
-// 超时选举
-func (rf *Raft) kickOffElection() {
-	rf.currentTerm++
-	rf.state = CANDIDATE
-	rf.votedFor = rf.me // candidate id
-	rf.persist()        // 将当前的持久化状态持久化 ! 防止宕机导致的不一致
-	votes := 1
-	total := len(rf.peers)
-	args := rf.getRequestVoteArgs() // 获取 请求的content  , 即创建请求的方法
-	mu := sync.Mutex{}
-	for i := 0; i < total; i++ {
-		//
-		if i == rf.me {
-			continue
-		}
-		// 使用goroutine去 投票, 并发的,
-		// 将 server传入, 表示是发给 谁的 ? 对应参数i,  即每个 server都会给你发一个则更好
-		go func(server int) {
-			reply := RequestVoteReply{}
-			if !rf.sendRequestVote(server, &args, &reply) {
-				return
-			}
-			if args.Term == rf.currentTerm && rf.state == CANDIDATE {
-				// 判断防止自己身份已经改变, 并且判断term 是否和自己是一个
-				if reply.Term < rf.currentTerm {
-					// 投票者日期小于自己, 丢弃
-					return
-				}
-				if reply.VoteGranted {
-					//如果确认给自己投票
-					mu.Lock()
-					votes++
-					if rf.state != LEADER && votes > total/2 {
-						// 超过半数, 并且当前不是leader  !
-						rf.initLeader() // 初始化一些leader 才有的信息
-						rf.state = LEADER
-						// 立刻开始心跳, 告诉所有的 节点我是leader了
-						go rf.sendHeartbeats()
-					}
-
-					mu.Unlock()
-				}
-			}
-		}(i)
-
-	}
-}
-
 // 创建一个快照， 包含了 截取到指定的index 的所有信息， 服务不再包含该索引之前的所有日志
 // raft 尽可能快的trim这些日志
 
@@ -578,7 +530,7 @@ func (rf *Raft) ticker() {
 	// 初始化 electionTimer
 	rf.resetElectionTimer()
 
-	for {
+	for rf.killed() == false {
 		select {
 		// candidate 有的选举timer , 存在每个candidate内部
 		case <-rf.electionTimer.C:
@@ -595,11 +547,11 @@ func (rf *Raft) ticker() {
 			rf.resetElectionTimer()
 
 		case <-rf.heartbeatTimer.C:
-			// 即 心跳超时, 此时需要重新发送 心跳 , leader独有的 心跳timer
+			// 即 心跳超时,leader  此时需要重新发送 心跳 , leader独有的 心跳timer( 需要定期的发送心跳
 			// 存在leader 的内部
 			rf.mu.Lock()
 			if rf.state == LEADER {
-				rf.sendHeartbeats() // Leader 定期发送心跳
+				rf.BroadcastHeartbeat(true) // Leader 定期发送心跳
 			}
 			rf.mu.Unlock()
 
@@ -608,6 +560,55 @@ func (rf *Raft) ticker() {
 		}
 	}
 }
+
+// 超时选举实现
+func (rf *Raft) kickOffElection() {
+	rf.currentTerm++
+	rf.state = CANDIDATE
+	rf.votedFor = rf.me // candidate id
+	rf.persist()        // 将当前的持久化状态持久化 ! 防止宕机导致的不一致
+	votes := 1
+	total := len(rf.peers)
+	args := rf.getRequestVoteArgs() // 获取 请求的content  , 即创建请求的方法
+	mu := sync.Mutex{}
+	for i := 0; i < total; i++ {
+		//
+		if i == rf.me {
+			continue
+		}
+		// 使用goroutine去 投票, 并发的,
+		// 将 server传入, 表示是发给 谁的 ? 对应参数i,  即每个 server都会给你发一个则更好
+		go func(server int) {
+			reply := RequestVoteReply{}
+			if !rf.sendRequestVote(server, &args, &reply) {
+				return
+			}
+			if args.Term == rf.currentTerm && rf.state == CANDIDATE {
+				// 判断防止自己身份已经改变, 并且判断term 是否和自己是一个
+				if reply.Term < rf.currentTerm {
+					// 投票者日期小于自己, 丢弃
+					return
+				}
+				if reply.VoteGranted {
+					//如果确认给自己投票
+					mu.Lock()
+					votes++
+					if rf.state != LEADER && votes > total/2 {
+						// 超过半数, 并且当前不是leader  !
+						rf.initLeader() // 初始化一些leader 才有的信息
+						rf.state = LEADER
+						// 立刻开始心跳, 告诉所有的 节点我是leader了
+						go rf.sendHeartbeats()
+					}
+
+					mu.Unlock()
+				}
+			}
+		}(i)
+
+	}
+}
+
 func (rf *Raft) resetElectionTimer() {
 	timeout := randomElectionTimeout()
 	if rf.electionTimer == nil {
