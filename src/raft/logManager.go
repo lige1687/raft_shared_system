@@ -38,11 +38,12 @@ type LogManager struct {
 // It returns true if the log entry exists and matches the term; otherwise, false.
 func (lm *LogManager) matchLog(prevLogTerm int, prevLogIndex int) bool {
 	// 检查指定的索引是否在当前日志范围内
+
 	if prevLogIndex < 1 || prevLogIndex > lm.len() {
 		return false // 如果索引无效，返回 false
 	}
 
-	// 获取指定索引位置的日志条目
+	// 获取指定索引位置的日志条目 , 因为这个 有锁, 所以本方法不能带锁
 	entry := lm.GetEntry(prevLogIndex)
 
 	// 检查日志条目的任期是否匹配
@@ -71,10 +72,10 @@ func (lm *LogManager) AppendEntry(term int, command interface{}) LogEntry {
 	return entry
 }
 
-// GetEntry returns the log entry at a specific index.
 func (lm *LogManager) GetEntry(index int) LogEntry {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
+	//todo 这里的 lm级别的锁不会导致问题吧
 	if index <= lm.lastTrimmedIndex || index >= lm.LastIndex() {
 		return LogEntry{}
 	}
@@ -153,6 +154,7 @@ func (lm *LogManager) getEntriesFrom(nextIndex int) []*LogEntry {
 
 // 注意 物理上的长度和逻辑的区别, 即 distance , 即 逻辑要减的快照索引- 实际内存中第一个日志的 逻辑索引= 物理内存上的logs 的索引
 // 这里的snapshotindex即 要裁剪到的索引, 即这个逻辑索引前都得没有
+// 表示裁剪成攻略 ,是否需要再用法附近 更新 lastincluded index ?
 func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
 	if len(logs) == 0 {
 		return logs // 如果没有日志条目，直接返回原日志切片
@@ -163,16 +165,18 @@ func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
 	if snapshotIndex >= logs[len(logs)-1].Index {
 		return []LogEntry{} // 如果快照包含了所有日志，返回空切片
 	}
+	//别忘记更新lastinclude index
 
 	// 保留 snapshotIndex 之后的日志条目
+
 	return logs[snapshotIndex+1:]
 }
 
 // FirstIndex 逻辑上的第一个索引是 lastTrimmedindex+ 1, 逻辑, 而非物理, 注意了 !
 // 其实 logentry 里边的 index 也可以用来干这个, 不过你知道逻辑和物理的区别也可以
 func (lm *LogManager) FirstIndex() int {
-	//lm.mu.Lock()
-	//defer lm.mu.Unlock()
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
 
 	if len(lm.logs) == 0 {
 		// 如果日志为空，则返回修剪后的下一个索引

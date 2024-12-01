@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"sort"
 
 	"sync"
 	"sync/atomic"
@@ -142,13 +143,14 @@ func (rf *Raft) persist() {
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
-
+// 要求两个返回值哦
 func (rf *Raft) GetState() (int, bool) {
 	if rf.killed() {
 		return -1, false
 	}
 	var term int
 	var isleader bool
+
 	rf.mu.Lock()
 	// Your code here (2A).
 	term = rf.currentTerm
@@ -156,6 +158,8 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Unlock()
 	return term, isleader
 }
+
+//done
 
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// 客户端发来请求, 要求index之前的都 快照了, 只保留之后的
@@ -172,7 +176,14 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 	// trim 目录， 移除快照之前的 日志条目
 	// index - 第一个内存中的index 才是 logs数组中的索引
-	rf.lm.logs = shrinkEntriesArray(rf.lm.logs, index) // 结果重新赋值给 lm的logs
+	//rf.lm.logs = shrinkEntriesArray(rf.lm.logs, index) // 结果重新赋值给 lm的logs
+
+	// 别忘记更新 lastincluded  index !
+	var log []LogEntry
+	for i := index + 1; i <= rf.getLastLogIndex(); i++ {
+		log = append(log, rf.lm.GetEntry(i))
+	}
+	rf.lm.logs = log
 	rf.lm.logs[0].Command = nil
 	// 更新 snapshot 的状态, 等
 	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
@@ -205,7 +216,7 @@ type RequestVoteReply struct {
 	VoteGranted bool // 是否决定给你投票
 }
 
-// example code to send a RequestVote RPC to a server.
+// example code to send a requestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
 // fills in *reply with RPC reply, so caller should
@@ -232,9 +243,10 @@ type RequestVoteReply struct {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
+
 }
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
@@ -322,9 +334,17 @@ func (rf *Raft) ticker() {
 				// todo  对于candidate需要做什么? 并且锁的获取?
 				// 内部不能再有锁的获取了
 
+				rf.currentTerm += 1 // todo .... 你选举的时候忘记 +1了, 把自己的term
+
 				rf.ChangeState(CANDIDATE)
+
+				//
 				rf.StartElection()
 			}
+
+			rf.resetElectionTimer()
+			// todo 这里的锁应该释放呢, 因为还有不进入 election 的情况呢
+			rf.mu.Unlock()
 			// 重置选举计时器
 			//rf.resetElectionTimer()
 
@@ -344,14 +364,15 @@ func (rf *Raft) ticker() {
 }
 func (rf *Raft) StartElection() {
 	request := rf.getRequestVoteArgs()
+	// c , 这个方法也不能加锁 !!
 	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, request)
 	// use Closure
 	grantedVotes := 1
 	rf.votedFor = rf.me
 	rf.persist()
 
-	// 释放方法上边的锁
-	rf.mu.Unlock()
+	// 释放方法上边的锁 ,不能释放, 防止重复的 unlock
+	// rf.mu.Unlock()
 
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -360,7 +381,8 @@ func (rf *Raft) StartElection() {
 		go func(peer int) {
 			response := new(RequestVoteReply)
 			// 对于每一个同类, 发送请求
-			if rf.sendRequestVote(peer, request, response) {
+			// todo 发送之前需要保证有锁, 否则可能死锁, 这里确实如果在上层获取锁了, 但是里边go 又去获得锁, 会不会死锁?
+			if rf.sendRequestVote(peer, &request, response) {
 				// 这个时候再 获取锁 , defer, 因为在现场里边, 需要避免多线程并发的访问
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
@@ -388,59 +410,142 @@ func (rf *Raft) StartElection() {
 	}
 }
 
-// RequestVote  todo 收到投票请求后的处理 handler
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	if args.Term >= rf.currentTerm {
-		// 至少任期持平才会 进行下一步
-		if args.Term > rf.currentTerm {
-			// 碰到比自己新的了, 更新自己的任期, 并且立刻将自己的状态更新为follower
-			//根据 paper的设计, 别人已经比你更新了, 你就别candidate了
-			rf.enterNewTerm(args.Term) // 应该是需要一个atomic的操作
-			// 并且一些投票操作,  需要在新的任期里边做
-		}
-		if rf.state != CANDIDATE { // 如果不是候选人 就重置选举计时
-			// 因为此时接收到一个 选举请求了, 所以重置自己的计时器即可, 你不用选了, 有比你大的人在选了
+//func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//	defer DPrintf("{Node %v}'s state is {state %v, term %v}} after processing RequestVote,  RequestVoteArgs %v and RequestVoteReply %v ", rf.me, rf.state, rf.currentTerm, args, reply)
+//	// Reply false if term < currentTerm(§5.1)
+//	// if the term is same as currentTerm, and the votedFor is not null and not the candidateId, then reject the vote(§5.2)
+//	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId) {
+//		reply.Term, reply.VoteGranted = rf.currentTerm, false
+//		return
+//	}
+//
+//	if args.Term > rf.currentTerm {
+//		rf.ChangeState(FOLLOWER)
+//		rf.currentTerm, rf.votedFor = args.Term, -1
+//	}
+//
+//	// if candidate's log is not up-to-date, reject the vote(§5.4)
+//	if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+//		reply.Term, reply.VoteGranted = rf.currentTerm, false
+//		return
+//	}
+//
+//	rf.votedFor = args.CandidateId
+//	rf.electionTimer.Reset(RandomElectionTimeout())
+//	reply.Term, reply.VoteGranted = rf.currentTerm, true
+//}
 
-			rf.resetElectionTimer()
-		}
-		rf.mu.Lock()
-		reply.Term = rf.currentTerm // 构造reply
-		reply.VoteGranted = true
-		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-			// 表示已经投过票给当前的人 , 或者-1表示还没投给任何人
-			// 安全性检查
-			len := rf.lm.len() // 日志的逻辑长度, 因为有一部分可能已经到 快照里边了
+func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	// defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing requestVoteRequest %v and reply requestVoteResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
 
-			var lastLogIndex, lastLogTerm int
-			if len == rf.lm.lastTrimmedIndex {
-				// 如果 日志逻辑 长度 = trimmed index, 表示所有的日志都在 快照里边
-				lastLogIndex = rf.lm.lastTrimmedIndex
-				lastLogTerm = rf.lm.lastTrimmedTerm
-
-			} else {
-				lastLogIndex = len
-				lastLogTerm = rf.lm.GetEntry(len).Term
-			}
-			if lastLogTerm == 0 || lastLogTerm < args.LastLogTerm {
-				//在term 初始为0, 表示自己刚启动,
-				//或者自己的最后一个日志的 term小于 请求者的 term就投票
-				reply.VoteGranted = true
-				rf.votedFor = args.CandidateId
-				// 之前更新的是节点的term , 这里是最后一个log 的term
-			} else if lastLogTerm == args.LastLogTerm && lastLogIndex <= args.LastLogIndex {
-				// 在最后一个日志的 任期相同的情况下, 比较 logindex , 他比我的新, 投
-				reply.VoteGranted = true
-				rf.votedFor = args.CandidateId
-			}
-		}
-		rf.mu.Unlock()
+	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
+		response.Term, response.VoteGranted = rf.currentTerm, false
+		return
 	}
-	go rf.persist() // 将 一些信息 持久化 , 如当前的term和voted for
+	if request.Term > rf.currentTerm {
+		rf.ChangeState(FOLLOWER)
+		rf.currentTerm, rf.votedFor = request.Term, -1
+	}
+
+	if !rf.isLogUpToDate(request.LastLogTerm, request.LastLogIndex) {
+		response.Term, response.VoteGranted = rf.currentTerm, false
+		return
+	}
+	rf.votedFor = request.CandidateId
+	rf.resetElectionTimer()
+	response.Term, response.VoteGranted = rf.currentTerm, true
 }
 
+// 判断当前日志是否更新
+func (rf *Raft) isLogUpToDate(lastLogTerm int, lastLogIndex int) bool {
+	// 获取当前节点的最后一条日志的索引和 term
+	currentLastLogIndex := rf.lm.LastIndex()
+	currentLastLogTerm := rf.lm.GetEntry(currentLastLogIndex).Term
+
+	// 比较日志的 term 和 index
+	if lastLogTerm > currentLastLogTerm {
+		// 请求中的日志 term 更大，说明更新
+		return true
+	} else if lastLogTerm == currentLastLogTerm {
+		// 如果 term 相同，比较索引
+		return lastLogIndex >= currentLastLogIndex
+	}
+	// 否则，日志较旧
+	return false
+}
+
+// todo 可能是getentry 等方法上出了问题
+
+//// 收到投票请求后的处理 handler
+//func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+//	// 处理投票, 是要获取锁的 !
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//	if args.Term >= rf.currentTerm {
+//		// 至少任期持平才会 进行下一步
+//		if args.Term > rf.currentTerm {
+//			// 碰到比自己新的了, 更新自己的任期, 并且立刻将自己的状态更新为follower
+//			//根据 paper的设计, 别人已经比你更新了, 你就别candidate
+//
+//			rf.mu.Lock()
+//			rf.enterNewTerm(args.Term) // 应该是需要一个atomic的操作
+//			// todo 这个方法加锁不?
+//			rf.mu.Unlock()
+//
+//			// 并且一些投票操作,  需要在新的任期里边做
+//		}
+//		if rf.state != CANDIDATE { // 如果不是候选人 就重置选举计时
+//			// 因为此时接收到一个 选举请求了, 所以重置自己的计时器即可, 你不用选了, 有比你大的人在选了
+//
+//			rf.resetElectionTimer()
+//		}
+//		rf.mu.Lock()
+//		reply.Term = rf.currentTerm // 构造reply
+//		reply.VoteGranted = true
+//		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+//			// 表示已经投过票给当前的人 , 或者-1表示还没投给任何人
+//			// 安全性检查
+//			len := rf.lm.len() // 日志的逻辑长度, 因为有一部分可能已经到 快照里边了
+//
+//			var lastLogIndex, lastLogTerm int
+//			if len == rf.lm.lastTrimmedIndex {
+//				// 如果 日志逻辑 长度 = trimmed index, 表示所有的日志都在 快照里边
+//				lastLogIndex = rf.lm.lastTrimmedIndex
+//				lastLogTerm = rf.lm.lastTrimmedTerm
+//
+//			} else {
+//				lastLogIndex = len
+//				lastLogTerm = rf.lm.GetEntry(len).Term
+//			}
+//			if lastLogTerm == 0 || lastLogTerm < args.LastLogTerm {
+//				//在term 初始为0, 表示自己刚启动,
+//				//或者自己的最后一个日志的 term小于 请求者的 term就投票
+//				reply.VoteGranted = true
+//				rf.votedFor = args.CandidateId
+//				// 之前更新的是节点的term , 这里是最后一个log 的term
+//			} else if lastLogTerm == args.LastLogTerm && lastLogIndex <= args.LastLogIndex {
+//				// 在最后一个日志的 任期相同的情况下, 比较 logindex , 他比我的新, 投
+//				reply.VoteGranted = true
+//				rf.votedFor = args.CandidateId
+//			}
+//		}
+//		// 将其放在锁的内部比较好, 因为他是不受锁的保护的
+//		go rf.persist() // 将 一些信息 持久化 , 如当前的term和voted for
+//		rf.mu.Unlock()
+//	}
+//
+//}
+
+// done
 func (rf *Raft) enterNewTerm(newTerm int) {
-	rf.mu.Lock()         // 加锁，确保操作是原子的
-	defer rf.mu.Unlock() // 在函数结束时解锁
+	//rf.mu.Lock()         // 加锁，确保操作是原子的
+	//defer rf.mu.Unlock() // 在函数结束时解锁
+	// 但是这里的加锁 , 所有的父使用方法, 已经加过锁了, 所以 这里不能锁了, 锁的粒度有点大了
 
 	if newTerm <= rf.currentTerm {
 		return // 新的 term 必须比当前 term 大，才需要更新
@@ -456,11 +561,11 @@ func (rf *Raft) enterNewTerm(newTerm int) {
 	// fmt.Printf("Node %d entered new term %d\n", rf.me, newTerm)
 }
 
-// getRequestVoteArgs 构造请求投票的参数。
+// getRequestVoteArgs 构造请求投票的参数。 要求调用方法, 加锁 , 本层不能加锁
 func (rf *Raft) getRequestVoteArgs() RequestVoteArgs {
-	rf.mu.Lock()
-	defer rf.mu.Unlock() // 需要锁
-
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock() // 需要锁
+	// 锁锁锁
 	// 构造 RequestVoteArgs 并返回
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,       // 当前的任期
@@ -622,6 +727,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections， 用来触发 heartbeat timeout 和 election timeout
 	go rf.ticker()
 	// start applier goroutine to push committed logs into applyCh exactly once， ，用来往 applyCh 中 push 提交的日志并保证 exactly once
+	// 确保applier能获取锁哦!
+	//todo, 这里的锁的问题? 是否死锁 了
 	go rf.applier()
 
 	return rf
@@ -641,7 +748,12 @@ func (rf *Raft) replicator(peer int) {
 		// leader调用去检查是否一个节点需要复制
 		for !rf.needReplicating(peer) {
 			// 如果不需要复制, 就阻塞当前线程即可, 直到被唤醒
+
 			rf.replicatorCond[peer].Wait()
+			// todo , 你还没释放锁, 这个replicator先 阻塞了, 那岂不是 你持有的资源在 signal前不会被释放?
+			// the principle of the wait, it'll release the lock on cond and when it be signaled it will try to reclaim the lock
+			// so there is no need to check it
+			//
 		}
 
 		//或许使用管道技术会更好一点这里
@@ -653,7 +765,7 @@ func (rf *Raft) replicator(peer int) {
 
 // 是否一个节点需要 复制? leader调用
 func (rf *Raft) needReplicating(peer int) bool {
-	rf.mu.RLock() // 只需要用到读锁
+	rf.mu.RLock() // 只需要用到读suo
 	// 当前调用节点是leader才能 复制日志!
 	defer rf.mu.RUnlock()
 	return rf.state == LEADER && rf.matchIndexes[peer] < rf.lm.LastIndex()
@@ -722,6 +834,7 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *Insta
 
 	if request.Term > rf.currentTerm { // 更新自己的term
 		rf.currentTerm, rf.votedFor = request.Term, -1
+		// rf.state=FOLLOWER
 		rf.persist()
 	}
 
@@ -762,7 +875,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		rf.lm.logs = make([]LogEntry, 1)
 	} else { // rf.lm.logs[lastIncludedIndex-rf.getFirstLog().Index:]
 		relative := lastIncludedIndex - rf.lm.LastIndex()
+
 		rf.lm.logs = shrinkEntriesArray(rf.lm.logs, relative)
+		// 表示裁剪了, 是不是得更新 lastincluded index ?
+
 		rf.lm.logs[0].Command = nil
 	}
 	// 维护此时的快照boundary, 即 lastIncluded
@@ -775,31 +891,34 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
+// ...todo 我的方法都是 get args啊, 你这个命名错了吧
 // genAppendEntriesRequest generates an appendEntries request to send to a peer.
-func (rf *Raft) genAppendEntriesRequest(peer int) *AppendEntriesArgs {
-	// 获取当前日志条目
-	prevLogIndex := rf.matchIndexes[peer]            // peer 的 last matched log index
-	prevLogTerm := rf.lm.GetEntry(prevLogIndex).Term // 获取该日志条目的 term
+
+func (rf *Raft) genAppendEntriesRequest(prevLogIndex int) *AppendEntriesArgs {
+	// 获取prevLogIndex对应的日志条目
+	prevLogTerm := rf.lm.GetEntry(prevLogIndex).Term
 
 	// 获取 LogEntry 的指针切片
 	entries := make([]*LogEntry, 0, len(rf.lm.logs)) // 初始容量优化
 	for i := prevLogIndex + 1; i <= rf.lm.LastIndex(); i++ {
 		entries = append(entries, &rf.lm.logs[i-rf.lm.FirstIndex()])
 	}
-
-	// 创建并返回 AppendEntries 请求
-	return &AppendEntriesArgs{
-		Term:         rf.currentTerm, // 当前任期
-		LeaderID:     rf.me,          // 领导者 ID
-		PrevLogIndex: prevLogIndex,   // 上一个日志条目的索引
-		PrevLogTerm:  prevLogTerm,    // 上一个日志条目的任期
-		Entries:      entries,        // 要追加的日志条目
-		LeaderCommit: rf.commitIndex, // 领导者已提交的日志索引
+	// 创建AppendEntriesArgs对象
+	args := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderID:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
 	}
+	return args
 }
 
 // Leader 向Follwer 发送复制请求, 根据fo 的进度, 决定是通过 安装快照还是 追加条目来同步日志
 // 同步有两种方法, 一个是 apply快照, 另一个是 追加日志
+
+// replicatooneround 实现有问题
 
 func (rf *Raft) replicateOneRound(peer int) {
 	rf.mu.RLock()
@@ -917,32 +1036,47 @@ func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshot
 // 更新 commitindex给leader( 需要一个手段去通知leader, 自己的提交的index , 来帮助 leader判断一些半数情况
 // 根据 follower 的进度来更新leader 中的matchindex , 并且使得leader 来 确定哪些 日志可以提交, 即更新leader 的 commit index
 // leader 的commitindex是 半数以上的结果, 需要去访问所有的节点达到共识
+//
+//	func (rf *Raft) advanceCommitIndexForLeader() {
+//		// 获取当前日志的最后一个索引
+//		lastIndex := rf.lm.LastIndex()
+//
+//		// 计算大多数节点需要同步的 commitIndex
+//		for i := lastIndex; i >= rf.lm.FirstIndex(); i-- {
+//			// 获取该日志条目的任期
+//			term := rf.lm.GetEntry(i).Term
+//
+//			// 计算大多数节点的 matchIndex
+//			count := 0
+//			for peer := range rf.peers {
+//				if rf.matchIndexes[peer] >= i && rf.lm.GetEntry(i).Term == term {
+//					count++
+//				}
+//			}
+//
+//			// 如果大多数节点的 matchIndex 大于或等于 i，则更新 commitIndex
+//			if count > len(rf.peers)/2 && rf.lm.GetEntry(i).Term == rf.currentTerm {
+//				rf.commitIndex = i
+//				break
+//			}
+//		}
+//
+//		// 打印调试信息
+//		DPrintf("{Node %v} advanced commitIndex to %v", rf.me, rf.commitIndex)
+//	}
 func (rf *Raft) advanceCommitIndexForLeader() {
-	// 获取当前日志的最后一个索引
-	lastIndex := rf.lm.LastIndex()
-
-	// 计算大多数节点需要同步的 commitIndex
-	for i := lastIndex; i >= rf.lm.FirstIndex(); i-- {
-		// 获取该日志条目的任期
-		term := rf.lm.GetEntry(i).Term
-
-		// 计算大多数节点的 matchIndex
-		count := 0
-		for peer := range rf.peers {
-			if rf.matchIndexes[peer] >= i && rf.lm.GetEntry(i).Term == term {
-				count++
-			}
-		}
-
-		// 如果大多数节点的 matchIndex 大于或等于 i，则更新 commitIndex
-		if count > len(rf.peers)/2 && rf.lm.GetEntry(i).Term == rf.currentTerm {
-			rf.commitIndex = i
-			break
+	n := len(rf.matchIndexes)
+	sortMatchIndex := make([]int, n)
+	copy(sortMatchIndex, rf.matchIndexes)
+	sort.Ints(sortMatchIndex)
+	// get the index of the log entry with the highest index that is known to be replicated on a majority of servers
+	newCommitIndex := sortMatchIndex[n-(n/2+1)]
+	if newCommitIndex > rf.commitIndex {
+		if rf.lm.matchLog(newCommitIndex, rf.currentTerm) {
+			rf.commitIndex = newCommitIndex
+			rf.applyCond.Signal()
 		}
 	}
-
-	// 打印调试信息
-	DPrintf("{Node %v} advanced commitIndex to %v", rf.me, rf.commitIndex)
 }
 
 // 根据leader 的 commit 值, 更新 当前follower 的 commitindex , 确保 fo 的节点提交不落后于 leader
@@ -961,20 +1095,28 @@ func (rf *Raft) advanceCommitIndexForFollower(leaderCommit int) {
 
 // a dedicated applier goroutine to guarantee that 保证每个日志会被放到applych 一次
 // 并且保证效果是并行的
-// each log will be push into applyCh exactly once,
+// each log will be push into ApplyCh exactly once,
 // ensuring that service's applying entries
 // and raft's committing entries can be parallel
 func (rf *Raft) applier() {
 	for rf.killed() == false {
 		rf.mu.Lock()
-		// 如果没有必要 apply, 则阻塞, 通过信号量
+		// 如果没有必要 apply, 则阻塞, 通过信号量, todo 那你岂不是 这个锁就不会放开了??? 如果阻塞的话, 如果永远没有人来通知你的applier 启动,是否需要在之前释放锁?
+
+		// 上一次 applied 的 应用快照的 索引大于 , 提交的, 说明此时需要 等待 apply信息, 即不需要apply现在 , 释放锁 ?
+
 		for rf.lastApplied >= rf.commitIndex {
+			// todo 多次的unlock一个锁,?? todo !!
+			// rf.mu.Unlock()
+			//应该把锁放开, 然后再等待继续执行
 			rf.applyCond.Wait()
 		}
+		// rf.mu.Lock()
 		firstIndex, commitIndex, lastApplied := rf.lm.FirstIndex(), rf.commitIndex, rf.lastApplied
 		entries := make([]LogEntry, commitIndex-lastApplied)
 		copy(entries, rf.lm.logs[lastApplied+1-firstIndex:commitIndex+1-firstIndex])
 		rf.mu.Unlock()
+
 		// 对于每个要apply 的条目, 将其放入到applych中 用于异步的apply
 
 		for _, entry := range entries {
@@ -1142,6 +1284,7 @@ func (rf *Raft) ChangeState(newState RaftState) {
 	//defer rf.mu.Unlock() // 确保在函数返回时解锁
 
 	// 如果当前状态已经是目标状态，则不做任何操作
+
 	if rf.state == RaftState(newState) {
 		return
 	}
@@ -1158,6 +1301,7 @@ func (rf *Raft) ChangeState(newState RaftState) {
 		rf.votedFor = -1
 
 	}
+	//todo candidate 的内容
 	//其他的状态, 如 leader和leader 的初始化可以写在这里, initleader 等
 
 }
