@@ -39,30 +39,6 @@ func clone(orig []byte) []byte {
 	return x
 }
 
-// SaveStateAndSnapshot todo
-// Save both Raft state and K/V snapshot as a single atomic action,
-// to help avoid them getting out of sync.
-func (p *Persister) SaveStateAndSnapshot(state []byte, snapshot []byte) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	// 外层获取了锁, 内层就不能用获取了, 可重入锁!
-
-	// 更新内存中的状态和快照
-	p.raftstate = clone(state)
-	p.snapshot = clone(snapshot)
-
-	// 将状态和快照写入磁盘（假设文件存储路径为 raft_state 和 snapshot）
-	err := writeToFile("raft_state", p.raftstate)
-	if err != nil {
-		log.Fatalf("Failed to save raft state: %v", err)
-	}
-
-	err = writeToFile("snapshot", p.snapshot)
-	if err != nil {
-		log.Fatalf("Failed to save snapshot: %v", err)
-	}
-}
-
 func writeToFile(filename string, data []byte) error {
 	file, err := os.Create(filename)
 	if err != nil {
@@ -146,6 +122,14 @@ func (p *Persister) SaveRaftState(state []byte) {
 // 因此恢复持久化状态应该：
 // 1. data := rf.persister.ReadRaftState()
 // 2. rf.readPersist(data)
+func (ps *Persister) SaveStateAndSnapshot(raftstate []byte, snapshot []byte) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.raftstate = clone(raftstate)
+	if snapshot != nil {
+		ps.snapshot = clone(snapshot)
+	}
+}
 
 // 此时不需要锁, 因为 根本不涉及并发的状态
 func (rf *Raft) readPersist(data []byte) {
@@ -167,8 +151,9 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 
 	// 需要上锁, 并发的访问可能出现! 多线程同时访问一些内容
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	// 测, 不需要上锁 其实
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
@@ -186,7 +171,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.lm.logs = log
-
+		rf.lastApplied, rf.commitIndex = rf.lm.FirstIndex(), rf.lm.FirstIndex()
 		rf.lastIncludedIndex = lastIncludedIndex
 		rf.lastIncludedTerm = lastIncludedTerm
 

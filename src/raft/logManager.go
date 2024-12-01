@@ -34,20 +34,8 @@ type LogManager struct {
 	persister *Persister // 持久化管理器
 }
 
-// matchLog checks if the log entry at PrevLogIndex matches PrevLogTerm.
-// It returns true if the log entry exists and matches the term; otherwise, false.
-func (lm *LogManager) matchLog(prevLogTerm int, prevLogIndex int) bool {
-	// 检查指定的索引是否在当前日志范围内
-
-	if prevLogIndex < 1 || prevLogIndex > lm.len() {
-		return false // 如果索引无效，返回 false
-	}
-
-	// 获取指定索引位置的日志条目 , 因为这个 有锁, 所以本方法不能带锁
-	entry := lm.GetEntry(prevLogIndex)
-
-	// 检查日志条目的任期是否匹配
-	return entry.Term == prevLogTerm
+func (rf *Raft) LogMatched(index, term int) bool {
+	return index <= rf.lm.LastIndex() && term == rf.lm.logs[index-rf.lm.FirstIndex()].Term
 }
 
 // NewLogManager creates a new LogManager.
@@ -155,22 +143,22 @@ func (lm *LogManager) getEntriesFrom(nextIndex int) []*LogEntry {
 // 注意 物理上的长度和逻辑的区别, 即 distance , 即 逻辑要减的快照索引- 实际内存中第一个日志的 逻辑索引= 物理内存上的logs 的索引
 // 这里的snapshotindex即 要裁剪到的索引, 即这个逻辑索引前都得没有
 // 表示裁剪成攻略 ,是否需要再用法附近 更新 lastincluded index ?
-func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
-	if len(logs) == 0 {
-		return logs // 如果没有日志条目，直接返回原日志切片
-	}
-
-	// 计算从 snapshotIndex + 1 开始的日志条目
-	// 如果 snapshotIndex >= logs[0].Index，那么所有日志都已被裁剪( 因为全包含了
-	if snapshotIndex >= logs[len(logs)-1].Index {
-		return []LogEntry{} // 如果快照包含了所有日志，返回空切片
-	}
-	//别忘记更新lastinclude index
-
-	// 保留 snapshotIndex 之后的日志条目
-
-	return logs[snapshotIndex+1:]
-}
+//func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
+//	if len(logs) == 0 {
+//		return logs // 如果没有日志条目，直接返回原日志切片
+//	}
+//
+//	// 计算从 snapshotIndex + 1 开始的日志条目
+//	// 如果 snapshotIndex >= logs[0].Index，那么所有日志都已被裁剪( 因为全包含了
+//	if snapshotIndex >= logs[len(logs)-1].Index {
+//		return []LogEntry{} // 如果快照包含了所有日志，返回空切片
+//	}
+//	//别忘记更新lastinclude index
+//
+//	// 保留 snapshotIndex 之后的日志条目
+//
+//	return logs[snapshotIndex+1:]
+//}
 
 // FirstIndex 逻辑上的第一个索引是 lastTrimmedindex+ 1, 逻辑, 而非物理, 注意了 !
 // 其实 logentry 里边的 index 也可以用来干这个, 不过你知道逻辑和物理的区别也可以
@@ -325,4 +313,14 @@ func (lm *LogManager) split(start, end int) []LogEntry {
 
 	// 返回指定范围的日志条目
 	return lm.logs[relativeStart:relativeEnd]
+}
+
+func shrinkEntries(entries []LogEntry) []LogEntry {
+	const lenMultiple = 2
+	if cap(entries) > len(entries)*lenMultiple {
+		newEntries := make([]LogEntry, len(entries))
+		copy(newEntries, entries)
+		return newEntries
+	}
+	return entries
 }
