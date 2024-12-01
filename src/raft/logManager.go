@@ -6,13 +6,13 @@ import (
 	"sync"
 )
 
-func mergeAndDereference(logs []LogEntry, entries []*LogEntry) []LogEntry {
-	// 遍历 entries 数组，解引用每个指针并追加到 logs 数组
-	for _, entry := range entries {
-		logs = append(logs, *entry) // 解引用 entry，并将其追加到 logs 中
-	}
-	return logs
-}
+//func mergeAndDereference(logs []LogEntry, entries []*LogEntry) []LogEntry {
+//	// 遍历 entries 数组，解引用每个指针并追加到 logs 数组
+//	for _, entry := range entries {
+//		logs = append(logs, *entry) // 解引用 entry，并将其追加到 logs 中
+//	}
+//	return logs
+//}
 
 // LogEntry represents a single log entry in Raft.
 type LogEntry struct {
@@ -34,38 +34,26 @@ type LogManager struct {
 	persister *Persister // 持久化管理器
 }
 
-// matchLog checks if the log entry at PrevLogIndex matches PrevLogTerm.
-// It returns true if the log entry exists and matches the term; otherwise, false.
-func (lm *LogManager) matchLog(prevLogTerm int, prevLogIndex int) bool {
-	// 检查指定的索引是否在当前日志范围内
-
-	if prevLogIndex < 1 || prevLogIndex > lm.len() {
-		return false // 如果索引无效，返回 false
-	}
-
-	// 获取指定索引位置的日志条目 , 因为这个 有锁, 所以本方法不能带锁
-	entry := lm.GetEntry(prevLogIndex)
-
-	// 检查日志条目的任期是否匹配
-	return entry.Term == prevLogTerm
+func (rf *Raft) LogMatched(index, term int) bool {
+	return index <= rf.lm.LastIndex() && term == rf.lm.logs[index-rf.lm.FirstIndex()].Term
 }
 
-// NewLogManager creates a new LogManager.
-func NewLogManager(persister *Persister) *LogManager {
-	lm := &LogManager{
-		logs:      make([]LogEntry, 1), // 初始包含一个空日志项，用于索引偏移
-		persister: persister,
-	}
-	lm.Restore(persister.ReadRaftState()) // 从持久化状态恢复日志和快照
-	return lm
-}
+////  creates a new LogManager.
+//func NewLogManager(persister *Persister) *LogManager {
+//	lm := &LogManager{
+//		logs:      make([]LogEntry, 1), // 初始包含一个空日志项，用于索引偏移
+//		persister: persister,
+//	}
+//	lm.Restore(persister.ReadRaftState()) // 从持久化状态恢复日志和快照
+//	return lm
+//}
 
 // 锁, 确保外部调用的时候有锁!
 //
 // AppendEntry appends a new log entry to the log., 并且返回这个entry
 func (lm *LogManager) AppendEntry(term int, command interface{}) LogEntry {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 	entry := LogEntry{Term: term, Command: command}
 	lm.logs = append(lm.logs, entry)
 	lm.persist()
@@ -73,9 +61,9 @@ func (lm *LogManager) AppendEntry(term int, command interface{}) LogEntry {
 }
 
 func (lm *LogManager) GetEntry(index int) LogEntry {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-	//todo 这里的 lm级别的锁不会导致问题吧
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
+	//todo 这里的 lm级别的锁不会导致问题吧?
 	if index <= lm.lastTrimmedIndex || index >= lm.LastIndex() {
 		return LogEntry{}
 	}
@@ -155,28 +143,28 @@ func (lm *LogManager) getEntriesFrom(nextIndex int) []*LogEntry {
 // 注意 物理上的长度和逻辑的区别, 即 distance , 即 逻辑要减的快照索引- 实际内存中第一个日志的 逻辑索引= 物理内存上的logs 的索引
 // 这里的snapshotindex即 要裁剪到的索引, 即这个逻辑索引前都得没有
 // 表示裁剪成攻略 ,是否需要再用法附近 更新 lastincluded index ?
-func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
-	if len(logs) == 0 {
-		return logs // 如果没有日志条目，直接返回原日志切片
-	}
-
-	// 计算从 snapshotIndex + 1 开始的日志条目
-	// 如果 snapshotIndex >= logs[0].Index，那么所有日志都已被裁剪( 因为全包含了
-	if snapshotIndex >= logs[len(logs)-1].Index {
-		return []LogEntry{} // 如果快照包含了所有日志，返回空切片
-	}
-	//别忘记更新lastinclude index
-
-	// 保留 snapshotIndex 之后的日志条目
-
-	return logs[snapshotIndex+1:]
-}
+//func shrinkEntriesArray(logs []LogEntry, snapshotIndex int) []LogEntry {
+//	if len(logs) == 0 {
+//		return logs // 如果没有日志条目，直接返回原日志切片
+//	}
+//
+//	// 计算从 snapshotIndex + 1 开始的日志条目
+//	// 如果 snapshotIndex >= logs[0].Index，那么所有日志都已被裁剪( 因为全包含了
+//	if snapshotIndex >= logs[len(logs)-1].Index {
+//		return []LogEntry{} // 如果快照包含了所有日志，返回空切片
+//	}
+//	//别忘记更新lastinclude index
+//
+//	// 保留 snapshotIndex 之后的日志条目
+//
+//	return logs[snapshotIndex+1:]
+//}
 
 // FirstIndex 逻辑上的第一个索引是 lastTrimmedindex+ 1, 逻辑, 而非物理, 注意了 !
 // 其实 logentry 里边的 index 也可以用来干这个, 不过你知道逻辑和物理的区别也可以
 func (lm *LogManager) FirstIndex() int {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 
 	if len(lm.logs) == 0 {
 		// 如果日志为空，则返回修剪后的下一个索引
@@ -189,16 +177,16 @@ func (lm *LogManager) FirstIndex() int {
 
 // LastIndex returns the index of the last log entry.
 func (lm *LogManager) LastIndex() int {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 	return lm.lastTrimmedIndex + len(lm.logs) - 1
 	// 返回逻辑长度!!!
 }
 
 // LastTerm returns the term of the last log entry.
 func (lm *LogManager) LastTerm() int {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 	if len(lm.logs) > 0 {
 		// 表示  有一些日志在内存中, 还没有被快照裁剪
 		return lm.logs[len(lm.logs)-1].Term
@@ -223,70 +211,70 @@ func (lm *LogManager) persist() {
 	lm.persister.Save(raftstate, lm.persister.ReadSnapshot())
 }
 
-// ApplySnapshot replaces the log with the snapshot up to lastIncludedIndex and lastIncludedTerm.
-// 用这个方法来实现?
-func (lm *LogManager) ApplySnapshot(snapshot []byte, lastIncludedIndex, lastIncludedTerm int) {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-
-	lm.lastTrimmedIndex = lastIncludedIndex
-	lm.lastTrimmedTerm = lastIncludedTerm
-	lm.logs = nil // 清空日志，只保留快照之后的日志条目
-
-	// 持久化快照元数据
-	lm.persist()
-	lm.persister.Save(lm.persister.ReadRaftState(), snapshot)
-}
-
-// todo , 传来的index是已经确定在快照中的 截止索引 ,此时需要 维护一些变量 ,并且维护logs 数组
-func (lm *LogManager) trim(index int) {
-	// 确保裁剪的索引是合法的
-	if index <= lm.lastTrimmedIndex {
-		return // 已经裁剪过了，直接返回
-	}
-
-	// 计算裁剪的相对索引, 即要裁剪的 索引的绝对值
-	relativeIndex := index - lm.lastTrimmedIndex - 1
-
-	// 裁剪日志, 注意判断是否越界, 越界了表示所有 日志都应该清空
-
-	if relativeIndex >= len(lm.logs) {
-		lm.logs = nil // 如果裁剪范围包含所有日志，清空日志数组
-	} else {
-		lm.logs = lm.logs[relativeIndex:] // 保留从裁剪点之后的日志
-	}
-
-	// 更新最后裁剪的索引
-	lm.lastTrimmedIndex = index
-}
-
-// Restore restores log and snapshot metadata from persisted state.
-func (lm *LogManager) Restore(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
-
-	var lastIncludedIndex int
-	var lastIncludedTerm int
-	var logs []LogEntry
-
-	if d.Decode(&lastIncludedIndex) != nil ||
-		d.Decode(&lastIncludedTerm) != nil ||
-		d.Decode(&logs) != nil {
-		// handle error
-		return
-	}
-
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-
-	lm.lastTrimmedIndex = lastIncludedIndex
-	lm.lastTrimmedTerm = lastIncludedTerm
-	lm.logs = logs
-}
+//// ApplySnapshot replaces the log with the snapshot up to lastIncludedIndex and lastIncludedTerm.
+//// 用这个方法来实现?
+//func (lm *LogManager) ApplySnapshot(snapshot []byte, lastIncludedIndex, lastIncludedTerm int) {
+//	//lm.mu.Lock()
+//	//defer lm.mu.Unlock()
+//
+//	lm.lastTrimmedIndex = lastIncludedIndex
+//	lm.lastTrimmedTerm = lastIncludedTerm
+//	lm.logs = nil // 清空日志，只保留快照之后的日志条目
+//
+//	// 持久化快照元数据
+//	lm.persist()
+//	lm.persister.Save(lm.persister.ReadRaftState(), snapshot)
+//}
+//
+////
+//func (lm *LogManager) trim(index int) {
+//	// 确保裁剪的索引是合法的
+//	if index <= lm.lastTrimmedIndex {
+//		return // 已经裁剪过了，直接返回
+//	}
+//
+//	// 计算裁剪的相对索引, 即要裁剪的 索引的绝对值
+//	relativeIndex := index - lm.lastTrimmedIndex - 1
+//
+//	// 裁剪日志, 注意判断是否越界, 越界了表示所有 日志都应该清空
+//
+//	if relativeIndex >= len(lm.logs) {
+//		lm.logs = nil // 如果裁剪范围包含所有日志，清空日志数组
+//	} else {
+//		lm.logs = lm.logs[relativeIndex:] // 保留从裁剪点之后的日志
+//	}
+//
+//	// 更新最后裁剪的索引
+//	lm.lastTrimmedIndex = index
+//}
+//
+//// restores log and snapshot metadata from persisted state.
+//func (lm *LogManager) Restore(data []byte) {
+//	if data == nil || len(data) < 1 { // bootstrap without any state?
+//		return
+//	}
+//
+//	r := bytes.NewBuffer(data)
+//	d := labgob.NewDecoder(r)
+//
+//	var lastIncludedIndex int
+//	var lastIncludedTerm int
+//	var logs []LogEntry
+//
+//	if d.Decode(&lastIncludedIndex) != nil ||
+//		d.Decode(&lastIncludedTerm) != nil ||
+//		d.Decode(&logs) != nil {
+//		// handle error
+//		return
+//	}
+//
+//	lm.mu.Lock()
+//	defer lm.mu.Unlock()
+//
+//	lm.lastTrimmedIndex = lastIncludedIndex
+//	lm.lastTrimmedTerm = lastIncludedTerm
+//	lm.logs = logs
+//}
 
 // TruncateLog removes entries before a given index, typically after taking a snapshot.
 func (lm *LogManager) TruncateLog(lastIncludedIndex int, lastIncludedTerm int) {
@@ -304,7 +292,7 @@ func (lm *LogManager) TruncateLog(lastIncludedIndex int, lastIncludedTerm int) {
 }
 
 // len 方法返回逻辑上的日志长度，即最后一个日志的索引（包含已修剪的部分）。
-// trim 表示截止到目前, 日志都被 移转到 快照了
+// 表示截止到目前, 日志都被 移转到 快照了
 // 而 len 是返回逻辑上的 长度
 func (lm *LogManager) len() int {
 	lm.mu.Lock()
@@ -325,4 +313,18 @@ func (lm *LogManager) split(start, end int) []LogEntry {
 
 	// 返回指定范围的日志条目
 	return lm.logs[relativeStart:relativeEnd]
+}
+
+// shrinkEntriesArray discards the underlying array used by the entries slice
+// if most of it isn't being used. This avoids holding references to a bunch of
+// potentially large entries that aren't needed anymore. Simply clearing the
+// entries wouldn't be safe because clients might still be using them.
+func shrinkEntries(entries []LogEntry) []LogEntry {
+	const lenMultiple = 2
+	if cap(entries) > len(entries)*lenMultiple {
+		newEntries := make([]LogEntry, len(entries))
+		copy(newEntries, entries)
+		return newEntries
+	}
+	return entries
 }
