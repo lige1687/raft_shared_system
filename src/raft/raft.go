@@ -299,7 +299,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// 当一个raft节点产生的,时候, 就需要定期的去检查是否需要 重新选举? 即是否有leader
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		select {
@@ -307,65 +306,123 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			rf.ChangeState(CANDIDATE)
 			rf.currentTerm += 1
+			// start election
 			rf.StartElection()
-			rf.resetElectionTimer()
+			rf.electionTimer.Reset(RandomElectionTimeout()) // reset election timer in case of split vote
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
 			if rf.state == LEADER {
+				// should send heartbeat
 				rf.BroadcastHeartbeat(true)
-				rf.resetHeartbeatTimer()
+				rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
 			}
 			rf.mu.Unlock()
 		}
 	}
 }
 
+//// 当一个raft节点产生的,时候, 就需要定期的去检查是否需要 重新选举? 即是否有leader
+//func (rf *Raft) ticker() {
+//	for rf.killed() == false {
+//		select {
+//		case <-rf.electionTimer.C:
+//			rf.mu.Lock()
+//			rf.ChangeState(CANDIDATE)
+//			rf.currentTerm += 1
+//
+//			// todo 忘记persist 了,你以为不可能有问题 的代码也会有问题
+//			rf.persist()
+//			rf.StartElection()
+//			rf.resetElectionTimer()
+//			rf.mu.Unlock()
+//		case <-rf.heartbeatTimer.C:
+//			rf.mu.Lock()
+//			if rf.state == LEADER {
+//				rf.BroadcastHeartbeat(true)
+//				rf.resetHeartbeatTimer()
+//			}
+//			rf.mu.Unlock()
+//		}
+//	}
+//}
+//
+//func (rf *Raft) StartElection() {
+//	rf.votedFor = rf.me
+//
+//	rf.persist()
+//	request := rf.getRequestVoteArgs()
+//
+//	// c , 这个方法也不能加锁 !!
+//	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, request)
+//	// use Closure
+//	grantedVotes := 1
+//
+//	// 释放方法上边的锁 ,不能释放, 防止重复的 unlock
+//	// rf.mu.Unlock()
+//
+//	for peer := range rf.peers {
+//		if peer == rf.me {
+//			continue //跳过自己
+//		}
+//		go func(peer int) {
+//			response := new(RequestVoteReply)
+//			// 对于每一个同类, 发送请求
+//			// todo 发送之前需要保证有锁, 否则可能死锁, 这里确实如果在上层获取锁了, 但是里边go 又去获得锁, 会不会死锁?
+//			if rf.sendRequestVote(peer, request, response) {
+//				// 这个时候再 获取锁 , defer, 因为在现场里边, 需要避免多线程并发的访问
+//				rf.mu.Lock()
+//				defer rf.mu.Unlock()
+//				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, response, peer, request, rf.currentTerm)
+//				if rf.currentTerm == request.Term && rf.state == CANDIDATE {
+//					if response.VoteGranted { // 确保投给我了
+//						grantedVotes += 1
+//						if grantedVotes > len(rf.peers)/2 { // 超过半数, 开始
+//							DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
+//
+//							// 在外层调用了锁, 所以内存不能再 调用同一个锁
+//							//todo 是否是这个 changestate出了问题? 什么时候 term需要+1 ?
+//							//rf.initLeader(LEADER)
+//							rf.ChangeState(LEADER)
+//							// 发送心跳
+//							rf.BroadcastHeartbeat(true)
+//						}
+//					} else if response.Term > rf.currentTerm { // 人家比你还大, 回去吧你
+//						DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, response.Term, rf.currentTerm)
+//						rf.ChangeState(FOLLOWER)
+//						rf.currentTerm, rf.votedFor = response.Term, -1
+//						rf.persist()
+//					}
+//				}
+//			}
+//		}(peer)
+//	}
+//}
+
 func (rf *Raft) StartElection() {
 	rf.votedFor = rf.me
-
-	rf.persist()
-	request := rf.getRequestVoteArgs()
-
-	// c , 这个方法也不能加锁 !!
-	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, request)
-	// use Closure
+	args := rf.genRequestVoteArgs()
 	grantedVotes := 1
-
-	// 释放方法上边的锁 ,不能释放, 防止重复的 unlock
-	// rf.mu.Unlock()
-
 	for peer := range rf.peers {
 		if peer == rf.me {
-			continue //跳过自己
+			continue
 		}
 		go func(peer int) {
-			response := new(RequestVoteReply)
-			// 对于每一个同类, 发送请求
-			// todo 发送之前需要保证有锁, 否则可能死锁, 这里确实如果在上层获取锁了, 但是里边go 又去获得锁, 会不会死锁?
-			if rf.sendRequestVote(peer, request, response) {
-				// 这个时候再 获取锁 , defer, 因为在现场里边, 需要避免多线程并发的访问
+			reply := new(RequestVoteReply)
+			if rf.sendRequestVote(peer, args, reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, response, peer, request, rf.currentTerm)
-				if rf.currentTerm == request.Term && rf.state == CANDIDATE {
-					if response.VoteGranted { // 确保投给我了
+				if args.Term == rf.currentTerm && rf.state == CANDIDATE {
+					if reply.VoteGranted {
 						grantedVotes += 1
-						if grantedVotes > len(rf.peers)/2 { // 超过半数, 开始
-							DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
-
-							// 在外层调用了锁, 所以内存不能再 调用同一个锁
-							//todo 是否是这个 changestate出了问题? 什么时候 term需要+1 ?
-							//rf.initLeader(LEADER)
+						// check over half of the votes
+						if grantedVotes > len(rf.peers)/2 {
 							rf.ChangeState(LEADER)
-							// 发送心跳
 							rf.BroadcastHeartbeat(true)
 						}
-					} else if response.Term > rf.currentTerm { // 人家比你还大, 回去吧你
-						DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, response.Term, rf.currentTerm)
+					} else if reply.Term > rf.currentTerm {
 						rf.ChangeState(FOLLOWER)
-						rf.currentTerm, rf.votedFor = response.Term, -1
-						rf.persist()
+						rf.currentTerm, rf.votedFor = reply.Term, -1
 					}
 				}
 			}
@@ -378,24 +435,24 @@ func (rf *Raft) isLogUpToDate(index, term int) bool {
 	return term > lastLog.Term || (term == lastLog.Term && index >= lastLog.Index)
 }
 
-func (rf *Raft) enterNewTerm(newTerm int) {
-	//rf.mu.Lock()         // 加锁，确保操作是原子的
-	//defer rf.mu.Unlock() // 在函数结束时解锁
-	// 但是这里的加锁 , 所有的父使用方法, 已经加过锁了, 所以 这里不能锁了, 锁的粒度有点大了
-
-	if newTerm <= rf.currentTerm {
-		return // 新的 term 必须比当前 term 大，才需要更新
-	}
-
-	rf.currentTerm = newTerm // 更新当前的任期
-	rf.votedFor = -1         // 重置投票信息，以便在新任期重新投票
-	rf.state = FOLLOWER      // 回到 FOLLOWER 状态，防止在旧的任期中担任 Leader
-
-	rf.persist() // 持久化新的状态，确保重启后能恢复
-
-	// 可以在此处记录日志或其他处理逻辑
-	// fmt.Printf("Node %d entered new term %d\n", rf.me, newTerm)
-}
+//func (rf *Raft) enterNewTerm(newTerm int) {
+//	//rf.mu.Lock()         // 加锁，确保操作是原子的
+//	//defer rf.mu.Unlock() // 在函数结束时解锁
+//	// 但是这里的加锁 , 所有的父使用方法, 已经加过锁了, 所以 这里不能锁了, 锁的粒度有点大了
+//
+//	if newTerm <= rf.currentTerm {
+//		return // 新的 term 必须比当前 term 大，才需要更新
+//	}
+//
+//	rf.currentTerm = newTerm // 更新当前的任期
+//	rf.votedFor = -1         // 重置投票信息，以便在新任期重新投票
+//	rf.state = FOLLOWER      // 回到 FOLLOWER 状态，防止在旧的任期中担任 Leader
+//
+//	rf.persist() // 持久化新的状态，确保重启后能恢复
+//
+//	// 可以在此处记录日志或其他处理逻辑
+//	// fmt.Printf("Node %d entered new term %d\n", rf.me, newTerm)
+//}
 
 // getLastLogIndex 返回最后一个日志条目的索引。
 func (rf *Raft) getLastLogIndex() int {
@@ -484,30 +541,40 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // 每个 fo有一个leader
 func (rf *Raft) replicator(peer int) {
 	rf.replicatorCond[peer].L.Lock()
-	// 获取对应fol 的锁
-
 	defer rf.replicatorCond[peer].L.Unlock()
 	for rf.killed() == false {
-		// 如果不需要为这个 peer 复制条目，只要释放 CPU 并等待其他 goroutine 的信号，如果服务添加了新的命令
-		// 如果这个peer需要复制条目，这个goroutine会多次调用replicateOneRound(peer)直到这个peer赶上，然后等待
-		//不断的 追加使得 复制追上进度
-		// leader调用去检查是否一个节点需要复制
 		for !rf.needReplicating(peer) {
-			// 如果不需要复制, 就阻塞当前线程即可, 直到被唤醒
-
 			rf.replicatorCond[peer].Wait()
-			// todo , 你还没释放锁, 这个replicator先 阻塞了, 那岂不是 你持有的资源在 signal前不会被释放?
-			// the principle of the wait, it'll release the lock on cond and when it be signaled it will try to reclaim the lock
-			// so there is no need to check it
-			//
 		}
-
-		//或许使用管道技术会更好一点这里
-		// 如果需要复制, 遍历总会等到一个需要复制的 , 直接复制一个回合, 单轮的工作
-		// 搭配外层的 进行多轮的工作, 直到没有任何节点需要复制
+		// send log entries to peer
 		rf.replicateOnceRound(peer)
 	}
 }
+
+//func (rf *Raft) replicator(peer int) {
+//	rf.replicatorCond[peer].L.Lock()
+//	defer rf.replicatorCond[peer].L.Unlock()
+//	for rf.killed() == false {
+//		// 如果不需要为这个 peer 复制条目，只要释放 CPU 并等待其他 goroutine 的信号，如果服务添加了新的命令
+//		// 如果这个peer需要复制条目，这个goroutine会多次调用replicateOneRound(peer)直到这个peer赶上，然后等待
+//		//不断的 追加使得 复制追上进度
+//		// leader调用去检查是否一个节点需要复制
+//		for !rf.needReplicating(peer) {
+//			// 如果不需要复制, 就阻塞当前线程即可, 直到被唤醒
+//
+//			rf.replicatorCond[peer].Wait()
+//			// todo , 你还没释放锁, 这个replicator先 阻塞了, 那岂不是 你持有的资源在 signal前不会被释放?
+//			// the principle of the wait, it'll release the lock on cond and when it be signaled it will try to reclaim the lock
+//			// so there is no need to check it
+//			//
+//		}
+//
+//		//或许使用管道技术会更好一点这里
+//		// 如果需要复制, 遍历总会等到一个需要复制的 , 直接复制一个回合, 单轮的工作
+//		// 搭配外层的 进行多轮的工作, 直到没有任何节点需要复制
+//		rf.replicateOnceRound(peer)
+//	}
+//}
 
 // 是否一个节点需要 复制? leader调用
 func (rf *Raft) needReplicating(peer int) bool {
@@ -516,23 +583,38 @@ func (rf *Raft) needReplicating(peer int) bool {
 	defer rf.mu.RUnlock()
 	return rf.state == LEADER && rf.matchIndexes[peer] < rf.lm.LastIndex()
 }
-
-// BroadcastHeartbeat 心跳维持领导力( 另一个方法sendheartbeat的设计方式
-func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
+func (rf *Raft) BroadcastHeartbeat(isHeartbeat bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		if isHeartBeat {
-			// 是心跳, 则 作用是维持统治
+		if isHeartbeat {
+			// should send heartbeat to all peers immediately
 			go rf.replicateOnceRound(peer)
 		} else {
-			// 不是心跳, 表示此时是真的来append
-			//  将任务交给replicator, 去唤醒
+			// just need to signal replicator to send log entries to peer
 			rf.replicatorCond[peer].Signal()
 		}
 	}
 }
+
+//
+//// BroadcastHeartbeat 心跳维持领导力( 另一个方法sendheartbeat的设计方式
+//func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
+//	for peer := range rf.peers {
+//		if peer == rf.me {
+//			continue
+//		}
+//		if isHeartBeat {
+//			// 是心跳, 则 作用是维持统治
+//			go rf.replicateOnceRound(peer)
+//		} else {
+//			// 不是心跳, 表示此时是真的来append
+//			//  将任务交给replicator, 去唤醒
+//			rf.replicatorCond[peer].Signal()
+//		}
+//	}
+//}
 
 func (rf *Raft) replicateOnceRound(peer int) {
 	rf.mu.RLock()
@@ -562,7 +644,7 @@ func (rf *Raft) replicateOnceRound(peer int) {
 			DPrintf("{Node %v} sends InstallSnapshotArgs %v to {Node %v} and receives InstallSnapshotReply %v", rf.me, args, peer, reply)
 		}
 	} else {
-		args := rf.genAppendEntriesRequest(prevLogIndex)
+		args := rf.genAppendEntriesArgs(prevLogIndex)
 		rf.mu.RUnlock()
 		reply := new(AppendEntriesReply)
 		if rf.sendAppendEntries(peer, args, reply) {
@@ -570,14 +652,14 @@ func (rf *Raft) replicateOnceRound(peer int) {
 			if args.Term == rf.currentTerm && rf.state == LEADER {
 				if !reply.Success {
 					if reply.Term > rf.currentTerm {
-						// 现在不是leader
+						// indicate current server is not the leader
 						rf.ChangeState(FOLLOWER)
 						rf.currentTerm, rf.votedFor = reply.Term, -1
 						rf.persist()
 					} else if reply.Term == rf.currentTerm {
-						// 减 index并且重新尝试
+						// decrease nextIndex and retry
 						rf.nextIndexes[peer] = reply.XIndex
-						// TODO: 可以使用二分查找优化, 但是论文里边说不需要的
+						// TODO: optimize the nextIndex finding, maybe use binary search
 						if reply.XTerm != -1 {
 							firstLogIndex := rf.lm.FirstIndex()
 							for index := args.PrevLogIndex - 1; index >= firstLogIndex; index-- {
@@ -592,19 +674,95 @@ func (rf *Raft) replicateOnceRound(peer int) {
 					rf.matchIndexes[peer] = args.PrevLogIndex + len(args.Entries)
 					rf.nextIndexes[peer] = rf.matchIndexes[peer] + 1
 					// advance commitIndex if possible
-					rf.advanceCommitIndexForLeader()
 				}
+				rf.advanceCommitIndexForLeader()
 			}
-			rf.mu.Unlock()
-			DPrintf("{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
 		}
+		rf.mu.Unlock()
+		DPrintf("{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
 	}
 }
+
+//// leader调用, 去同步 每一个follower
+//func (rf *Raft) replicateOnceRound(peer int) {
+//	rf.mu.RLock()
+//	if rf.state != LEADER {
+//		rf.mu.RUnlock()
+//		return
+//	}
+//	prevLogIndex := rf.nextIndexes[peer] - 1
+//	if prevLogIndex < rf.lm.FirstIndex() { // 有两种方式 同步, 一种是snapshot, 一种是 日志同步
+//		// 如果 leader 的index小于 当前的, 则需要覆盖, 覆盖需要snapshot
+//
+//		args := rf.genInstallSnapshotRequest() // 产生快照, 将其发给leader , follower只能无条件接受
+//		rf.mu.RUnlock()
+//		reply := new(InstallSnapshotResponse)
+//		if rf.sendInstallSnapshot(peer, args, reply) {
+//			rf.mu.Lock()
+//			if rf.state == LEADER && rf.currentTerm == args.Term {
+//				if reply.Term > rf.currentTerm {
+//					rf.ChangeState(FOLLOWER)
+//					rf.currentTerm, rf.votedFor = reply.Term, -1
+//					rf.persist()
+//				} else {
+//					rf.nextIndexes[peer] = args.LastIncludedIndex + 1
+//					rf.matchIndexes[peer] = args.LastIncludedIndex
+//				}
+//			}
+//			rf.mu.Unlock()
+//			DPrintf("{Node %v} sends InstallSnapshotArgs %v to {Node %v} and receives InstallSnapshotReply %v", rf.me, args, peer, reply)
+//		}
+//	} else {
+//		// 否则就是ae日志同步
+//		args := rf.genAppendEntriesArgs(prevLogIndex)
+//		rf.mu.RUnlock()
+//		reply := new(AppendEntriesReply)
+//		if rf.sendAppendEntries(peer, args, reply) {
+//			rf.mu.Lock()
+//			if args.Term == rf.currentTerm && rf.state == LEADER {
+//				if !reply.Success { // 如果reply不成功,  说明x term没找对 或者xindex没找对
+//
+//					if reply.Term > rf.currentTerm {
+//						// 现在不是leader
+//						rf.ChangeState(FOLLOWER)
+//						rf.currentTerm, rf.votedFor = reply.Term, -1
+//						rf.persist()
+//					} else if reply.Term == rf.currentTerm {
+//						// 减 index并且重新尝试
+//						rf.nextIndexes[peer] = reply.XIndex
+//						// TODO: 可以使用二分查找优化, 但是论文里边说不需要的
+//						if reply.XTerm != -1 {
+//							firstLogIndex := rf.lm.FirstIndex()
+//							for index := args.PrevLogIndex - 1; index >= firstLogIndex; index-- {
+//								if rf.lm.logs[index-firstLogIndex].Term == reply.XTerm {
+//									rf.nextIndexes[peer] = index
+//									break
+//								}
+//							}
+//						}
+//					}
+//				} else { // 成功了, 就更新对应的 matchindex即可, 但是需要一个方法去统一的更新 leader 的commitindex
+//
+//					rf.matchIndexes[peer] = args.PrevLogIndex + len(args.Entries)
+//					rf.nextIndexes[peer] = rf.matchIndexes[peer] + 1
+//					// 更新 leader , 维护
+//					//rf.advanceCommitIndexForLeader()
+//				}
+//				// todo 不论 reply成功与否 ,都需要去 更新 leader 的commit index
+//				rf.advanceCommitIndexForLeader() // todo 你这里括号不匹配了, 逻辑错误了
+//			}
+//		}
+//		rf.mu.Unlock()
+//		DPrintf("{Node %v} sends AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
+//
+//	}
+//}
 
 func (rf *Raft) advanceCommitIndexForLeader() {
 	n := len(rf.matchIndexes)
 	sortMatchIndex := make([]int, n)
 	copy(sortMatchIndex, rf.matchIndexes)
+	// 复制一个备份,防止 中途被修改 ?
 	sort.Ints(sortMatchIndex)
 	// 从 所欲的follower中找到一个最大的 并且超过半数的 commit index 给leader
 	newCommitIndex := sortMatchIndex[n-(n/2+1)]
@@ -618,8 +776,10 @@ func (rf *Raft) advanceCommitIndexForLeader() {
 
 // 根据leader 的 commit 值, 更新 当前follower 的 commitindex , 确保 fo 的节点提交不落后于 leader
 func (rf *Raft) advanceCommitIndexForFollower(leaderCommit int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+
+	// 之前调用这个方法的方法, 有锁, 所以这里不能锁
 
 	// 更新 commitIndex 使其不超过 leaderCommit 和当前日志的长度
 	// 1. leaderCommit 必须大于当前 commitIndex 才能推进

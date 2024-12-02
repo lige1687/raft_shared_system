@@ -73,8 +73,8 @@ func (lm *LogManager) GetEntry(index int) LogEntry {
 }
 
 func (lm *LogManager) LastEntry() *LogEntry {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 
 	// 如果日志数组为空，说明没有日志条目
 	if len(lm.logs) == 0 {
@@ -278,8 +278,8 @@ func (lm *LogManager) persist() {
 
 // TruncateLog removes entries before a given index, typically after taking a snapshot.
 func (lm *LogManager) TruncateLog(lastIncludedIndex int, lastIncludedTerm int) {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 
 	if lastIncludedIndex < lm.lastTrimmedIndex {
 		return
@@ -291,12 +291,9 @@ func (lm *LogManager) TruncateLog(lastIncludedIndex int, lastIncludedTerm int) {
 	lm.persist()
 }
 
-// len 方法返回逻辑上的日志长度，即最后一个日志的索引（包含已修剪的部分）。
-// 表示截止到目前, 日志都被 移转到 快照了
-// 而 len 是返回逻辑上的 长度
 func (lm *LogManager) len() int {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	//lm.mu.Lock()
+	//defer lm.mu.Unlock()
 	return lm.lastTrimmedIndex + len(lm.logs)
 }
 

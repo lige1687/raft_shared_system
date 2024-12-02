@@ -2,6 +2,16 @@ package raft
 
 import "fmt"
 
+func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
+	args := &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: rf.getLastLogIndex(),
+		LastLogTerm:  rf.getLastLogTerm(),
+	}
+	return args
+}
+
 type InstallSnapshotRequest struct {
 	Term     int // 当前请求的任期
 	LeaderID int // 领导者的节点 ID
@@ -111,7 +121,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // ...todo 我的方法都是 get args啊, 你这个命名错了吧
 // genAppendEntriesRequest generates an appendEntries request to send to a peer.
 
-func (rf *Raft) genAppendEntriesRequest(prevLogIndex int) *AppendEntriesArgs {
+func (rf *Raft) genAppendEntriesArgs(prevLogIndex int) *AppendEntriesArgs {
 	// 获取prevLogIndex对应的日志条目
 	firstLogIndex := rf.lm.FirstIndex()
 	entries := make([]LogEntry, len(rf.lm.logs[prevLogIndex-firstLogIndex+1:]))
@@ -145,31 +155,31 @@ func (rf *Raft) getRequestVoteArgs() *RequestVoteArgs {
 	}
 	return args
 }
-
-func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing requestVoteRequest %v and reply requestVoteResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
-
-	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
-		response.Term, response.VoteGranted = rf.currentTerm, false
+	defer DPrintf("{Node %v}'s state is {state %v, term %v}} after processing RequestVote,  RequestVoteArgs %v and RequestVoteReply %v ", rf.me, rf.state, rf.currentTerm, args, reply)
+	// Reply false if term < currentTerm(§5.1)
+	// if the term is same as currentTerm, and the votedFor is not null and not the candidateId, then reject the vote(§5.2)
+	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId) {
+		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
 	}
-	if request.Term > rf.currentTerm {
+
+	if args.Term > rf.currentTerm {
 		rf.ChangeState(FOLLOWER)
-		rf.currentTerm, rf.votedFor = request.Term, -1
-		rf.persist()
+		rf.currentTerm, rf.votedFor = args.Term, -1
 	}
 
-	if !rf.isLogUpToDate(request.LastLogTerm, request.LastLogIndex) {
-		response.Term, response.VoteGranted = rf.currentTerm, false
+	// if candidate's log is not up-to-date, reject the vote(§5.4)
+	if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
 	}
-	rf.votedFor = request.CandidateId
-	rf.persist()
-	rf.resetElectionTimer()
 
-	response.Term, response.VoteGranted = rf.currentTerm, true
+	rf.votedFor = args.CandidateId
+	rf.electionTimer.Reset(RandomElectionTimeout())
+	reply.Term, reply.VoteGranted = rf.currentTerm, true
 }
 
 type AppendEntriesArgs struct {
@@ -247,26 +257,26 @@ type AppendEntriesReply struct {
 //	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), rf.lastIncludedTerm, rf.lastIncludedIndex)
 //}
 
-// handleInstallSnapshotResponse
-// 从一个peer来的请求, 告诉你要按照快照了
-// 传入request, 通过response返回信息
-func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
-	if response.Term > rf.currentTerm {
-		// 如果返回的任期大于当前任期，更新 Raft 节点的任期并转换为 Follower
-		rf.enterNewTerm(response.Term)
-		rf.state = FOLLOWER
-	}
-
-	// 如果响应成功，更新该 peer 的 matchIndex 和 nextIndex
-	if response.Success {
-		rf.matchIndexes[peer] = request.LastIncludedIndex
-		rf.nextIndexes[peer] = request.LastIncludedIndex + 1
-		rf.applyCond.Signal() // 唤醒 apply goroutine，应用新的快照
-	} else {
-		// 处理失败的响应，通常会进行重试或调整 nextIndex
-		rf.nextIndexes[peer] = rf.matchIndexes[peer] // 调整 nextIndex
-	}
-}
+////
+//// 从一个peer来的请求, 告诉你要按照快照了
+//// 传入request, 通过response返回信息
+//func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+//	if response.Term > rf.currentTerm {
+//		// 如果返回的任期大于当前任期，更新 Raft 节点的任期并转换为 Follower
+//		rf.enterNewTerm(response.Term)
+//		rf.state = FOLLOWER
+//	}
+//
+//	// 如果响应成功，更新该 peer 的 matchIndex 和 nextIndex
+//	if response.Success {
+//		rf.matchIndexes[peer] = request.LastIncludedIndex
+//		rf.nextIndexes[peer] = request.LastIncludedIndex + 1
+//		rf.applyCond.Signal() // 唤醒 apply goroutine，应用新的快照
+//	} else {
+//		// 处理失败的响应，通常会进行重试或调整 nextIndex
+//		rf.nextIndexes[peer] = rf.matchIndexes[peer] // 调整 nextIndex
+//	}
+//}
 
 // Follwer 接收 Leader日志同步 处理
 
@@ -311,8 +321,11 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		} else {
 			firstIndex := rf.lm.FirstIndex()
 			//	response.XTerm = rf.lm.logs[request.PrevLogIndex-firstIndex].Term
-			index := request.PrevLogIndex - 1
-			for index >= firstIndex && rf.lm.logs[index-firstIndex].Term == response.XTerm {
+
+			// index := request.PrevLogIndex - 1 ? todo这里逻辑是不是错了,不应该-1 ?
+			index := request.PrevLogIndex
+			// 这里逻辑也错了, 是为了找到对应的index , 所以要的是 找到 当前fo里边的term和args 的 prevlogterm , 即当前termp匹配的
+			for index >= firstIndex && rf.lm.logs[index-firstIndex].Term == request.PrevLogTerm {
 				index--
 			}
 			response.XIndex, response.XTerm = index+1, request.PrevLogTerm
@@ -346,7 +359,10 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		}
 	}
 
-	// 通知上层可以apply主节点已经commit的日志。
+	//todo 逻辑上的遗漏 , 如果leader commit 大于 了 当前的commit index , 就需要将 commit 更新为 min commit index 和 数组最后一个的索引
+	// 因为超过数组长度的不能提交啊, 实际就是通知commitindex follower  逻辑
+
+	//通知上层可以apply主节点已经commit的日志。
 	rf.advanceCommitIndexForFollower(request.LeaderCommit)
 
 	response.Term, response.Success = rf.currentTerm, true

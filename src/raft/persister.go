@@ -161,19 +161,16 @@ func (rf *Raft) readPersist(data []byte) {
 	var votedFor int
 	var log []LogEntry
 
-	var lastIncludedIndex int
-	var lastIncludedTerm int
-
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil ||
-		d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
 		DPrintf("Raft server %d readPersist ERROR!\n", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.lm.logs = log
+
 		rf.lastApplied, rf.commitIndex = rf.lm.FirstIndex(), rf.lm.FirstIndex()
-		rf.lastIncludedIndex = lastIncludedIndex
-		rf.lastIncludedTerm = lastIncludedTerm
+		//rf.lastIncludedIndex = lastIncludedIndex
+		//rf.lastIncludedTerm = lastIncludedTerm
 
 	}
 }
