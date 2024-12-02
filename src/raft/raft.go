@@ -134,33 +134,48 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == LEADER
 }
 
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// 客户端发来请求, 要求index之前的都 快照了, 只保留之后的
+//func (rf *Raft) Snapshot(index int, snapshot []byte) {
+//	// 客户端发来请求, 要求index之前的都 快照了, 只保留之后的
+//
+//	//放心锁 ,没有问题
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//	// snapshotIndex := rf.getFirstLog().Index
+//	snapshotIndex := rf.lm.FirstIndex()
+//	// 第一个log 的逻辑日志, 即在内存中的 第一个log 的逻辑index
+//	if index <= snapshotIndex || index > rf.getLastLogIndex() {
+//		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
+//		return
+//	}
+//	// trim 目录， 移除快照之前的 日志条目
+//	// index - 第一个内存中的index 才是 logs数组中的索引
+//	//rf.lm.logs = shrinkEntriesArray(rf.lm.logs, index) // 结果重新赋值给 lm的logs
+//
+//	// 别忘记更新 lastincluded  index !
+//	//var log []LogEntry
+//	//for i := index + 1; i <= rf.getLastLogIndex(); i++ {
+//	//	log = append(log, rf.lm.GetEntry(i))
+//	//}
+//	rf.lm.logs = shrinkEntries(rf.lm.logs[index-snapshotIndex:])
+//	rf.lm.logs[0].Command = nil
+//	// 更新 snapshot 的状态, 等
+//	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+//	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), index, snapshotIndex)
+//}
 
-	//放心锁 ,没有问题
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// snapshotIndex := rf.getFirstLog().Index
 	snapshotIndex := rf.lm.FirstIndex()
-	// 第一个log 的逻辑日志, 即在内存中的 第一个log 的逻辑index
-	if index <= snapshotIndex || index > rf.getLastLogIndex() {
+	if index <= snapshotIndex || index > rf.lm.LastIndex() {
 		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
 		return
 	}
-	// trim 目录， 移除快照之前的 日志条目
-	// index - 第一个内存中的index 才是 logs数组中的索引
-	//rf.lm.logs = shrinkEntriesArray(rf.lm.logs, index) // 结果重新赋值给 lm的logs
-
-	// 别忘记更新 lastincluded  index !
-	//var log []LogEntry
-	//for i := index + 1; i <= rf.getLastLogIndex(); i++ {
-	//	log = append(log, rf.lm.GetEntry(i))
-	//}
+	// remove log entries up to index
 	rf.lm.logs = shrinkEntries(rf.lm.logs[index-snapshotIndex:])
 	rf.lm.logs[0].Command = nil
-	// 更新 snapshot 的状态, 等
 	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), index, snapshotIndex)
+	//DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot with index %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index)
 }
 
 func (rf *Raft) encodeState() []byte {
@@ -170,27 +185,6 @@ func (rf *Raft) encodeState() []byte {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.lm.logs)
 	return w.Bytes()
-}
-
-// RequestVoteArgs example RequestVote RPC arguments structure.
-// field names must start with capital letters !
-type RequestVoteArgs struct {
-	// 详细内容参考 论文中的设计
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-	// Your data here (3A, 3B).
-}
-
-// RequestVoteReply example RequestVote RPC reply structure.
-// field names must start with capital letters!
-// 大写字母开始! 必须
-type RequestVoteReply struct {
-
-	// Your data here (3A).
-	Term        int  // 投票者的任期
-	VoteGranted bool // 是否决定给你投票
 }
 
 // example code to send a requestVote RPC to a server.
@@ -220,15 +214,6 @@ type RequestVoteReply struct {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-
-}
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
-}
 
 // Start the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -322,82 +307,116 @@ func (rf *Raft) ticker() {
 	}
 }
 
-//// 当一个raft节点产生的,时候, 就需要定期的去检查是否需要 重新选举? 即是否有leader
-//func (rf *Raft) ticker() {
-//	for rf.killed() == false {
-//		select {
-//		case <-rf.electionTimer.C:
-//			rf.mu.Lock()
-//			rf.ChangeState(CANDIDATE)
-//			rf.currentTerm += 1
+// // 当一个raft节点产生的,时候, 就需要定期的去检查是否需要 重新选举? 即是否有leader
 //
-//			// todo 忘记persist 了,你以为不可能有问题 的代码也会有问题
-//			rf.persist()
-//			rf.StartElection()
-//			rf.resetElectionTimer()
-//			rf.mu.Unlock()
-//		case <-rf.heartbeatTimer.C:
-//			rf.mu.Lock()
-//			if rf.state == LEADER {
-//				rf.BroadcastHeartbeat(true)
-//				rf.resetHeartbeatTimer()
+//	func (rf *Raft) ticker() {
+//		for rf.killed() == false {
+//			select {
+//			case <-rf.electionTimer.C:
+//				rf.mu.Lock()
+//				rf.ChangeState(CANDIDATE)
+//				rf.currentTerm += 1
+//
+//				// todo 忘记persist 了,你以为不可能有问题 的代码也会有问题
+//				rf.persist()
+//				rf.StartElection()
+//				rf.resetElectionTimer()
+//				rf.mu.Unlock()
+//			case <-rf.heartbeatTimer.C:
+//				rf.mu.Lock()
+//				if rf.state == LEADER {
+//					rf.BroadcastHeartbeat(true)
+//					rf.resetHeartbeatTimer()
+//				}
+//				rf.mu.Unlock()
 //			}
-//			rf.mu.Unlock()
 //		}
 //	}
-//}
 //
-//func (rf *Raft) StartElection() {
-//	rf.votedFor = rf.me
+//	func (rf *Raft) StartElection() {
+//		rf.votedFor = rf.me
 //
-//	rf.persist()
-//	request := rf.getRequestVoteArgs()
+//		rf.persist()
+//		request := rf.getRequestVoteArgs()
 //
-//	// c , 这个方法也不能加锁 !!
-//	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, request)
-//	// use Closure
-//	grantedVotes := 1
+//		// c , 这个方法也不能加锁 !!
+//		DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, request)
+//		// use Closure
+//		grantedVotes := 1
 //
-//	// 释放方法上边的锁 ,不能释放, 防止重复的 unlock
-//	// rf.mu.Unlock()
+//		// 释放方法上边的锁 ,不能释放, 防止重复的 unlock
+//		// rf.mu.Unlock()
 //
-//	for peer := range rf.peers {
-//		if peer == rf.me {
-//			continue //跳过自己
-//		}
-//		go func(peer int) {
-//			response := new(RequestVoteReply)
-//			// 对于每一个同类, 发送请求
-//			// todo 发送之前需要保证有锁, 否则可能死锁, 这里确实如果在上层获取锁了, 但是里边go 又去获得锁, 会不会死锁?
-//			if rf.sendRequestVote(peer, request, response) {
-//				// 这个时候再 获取锁 , defer, 因为在现场里边, 需要避免多线程并发的访问
-//				rf.mu.Lock()
-//				defer rf.mu.Unlock()
-//				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, response, peer, request, rf.currentTerm)
-//				if rf.currentTerm == request.Term && rf.state == CANDIDATE {
-//					if response.VoteGranted { // 确保投给我了
-//						grantedVotes += 1
-//						if grantedVotes > len(rf.peers)/2 { // 超过半数, 开始
-//							DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
+//		for peer := range rf.peers {
+//			if peer == rf.me {
+//				continue //跳过自己
+//			}
+//			go func(peer int) {
+//				response := new(RequestVoteReply)
+//				// 对于每一个同类, 发送请求
+//				// todo 发送之前需要保证有锁, 否则可能死锁, 这里确实如果在上层获取锁了, 但是里边go 又去获得锁, 会不会死锁?
+//				if rf.sendRequestVote(peer, request, response) {
+//					// 这个时候再 获取锁 , defer, 因为在现场里边, 需要避免多线程并发的访问
+//					rf.mu.Lock()
+//					defer rf.mu.Unlock()
+//					DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, response, peer, request, rf.currentTerm)
+//					if rf.currentTerm == request.Term && rf.state == CANDIDATE {
+//						if response.VoteGranted { // 确保投给我了
+//							grantedVotes += 1
+//							if grantedVotes > len(rf.peers)/2 { // 超过半数, 开始
+//								DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
 //
-//							// 在外层调用了锁, 所以内存不能再 调用同一个锁
-//							//todo 是否是这个 changestate出了问题? 什么时候 term需要+1 ?
-//							//rf.initLeader(LEADER)
-//							rf.ChangeState(LEADER)
-//							// 发送心跳
-//							rf.BroadcastHeartbeat(true)
+//								// 在外层调用了锁, 所以内存不能再 调用同一个锁
+//								//todo 是否是这个 changestate出了问题? 什么时候 term需要+1 ?
+//								//rf.initLeader(LEADER)
+//								rf.ChangeState(LEADER)
+//								// 发送心跳
+//								rf.BroadcastHeartbeat(true)
+//							}
+//						} else if response.Term > rf.currentTerm { // 人家比你还大, 回去吧你
+//							DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, response.Term, rf.currentTerm)
+//							rf.ChangeState(FOLLOWER)
+//							rf.currentTerm, rf.votedFor = response.Term, -1
+//							rf.persist()
 //						}
-//					} else if response.Term > rf.currentTerm { // 人家比你还大, 回去吧你
-//						DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, response.Term, rf.currentTerm)
-//						rf.ChangeState(FOLLOWER)
-//						rf.currentTerm, rf.votedFor = response.Term, -1
-//						rf.persist()
 //					}
 //				}
-//			}
-//		}(peer)
+//			}(peer)
+//		}
 //	}
-//}
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex %v to check whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
+
+	// 和上述逻辑一样, 过期的则跳过
+	if lastIncludedIndex <= rf.commitIndex {
+		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger", rf.me, lastIncludedIndex, rf.commitIndex)
+		return false
+	}
+	// 如果不过期, 需要apply的话, 两种情况, 一种是超过了索引界限, 则直接置空内存里边的 slice即可, 此时的数据在snapshot里边, 注意保存snapshot 在本地哦
+
+	if lastIncludedIndex > rf.lm.LastIndex() {
+		rf.lm.logs = make([]LogEntry, 1)
+	} else { // rf.lm.logs[lastIncludedIndex-rf.getFirstLog().Index:]
+		//relative := lastIncludedIndex - rf.lm.LastIndex()
+		//
+		//rf.lm.logs = shrinkEntriesArray(rf.lm.logs, relative)
+		//// 表示裁剪了, 是不是得更新 lastincluded index ?
+
+		rf.lm.logs = shrinkEntries(rf.lm.logs[lastIncludedIndex-rf.lm.FirstIndex():])
+
+		rf.lm.logs[0].Command = nil
+	}
+	// 维护此时的快照boundary, 即 lastIncluded
+	rf.lm.logs[0].Term, rf.lm.logs[0].Index = lastIncludedTerm, lastIncludedIndex
+	rf.lastApplied, rf.commitIndex = lastIncludedIndex, lastIncludedIndex
+
+	// 保持 snapshot 的状态
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.lm.GetEntry(rf.lm.FirstIndex()), rf.lm.GetEntry(rf.lm.LastIndex()), lastIncludedTerm, lastIncludedIndex)
+	return true
+}
 
 func (rf *Raft) StartElection() {
 	rf.votedFor = rf.me
@@ -479,63 +498,111 @@ func (rf *Raft) getLastLogTerm() int {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-
 	rf := &Raft{
-		mu: sync.RWMutex{},
-		// todo,你初始化竟然没有带锁? ...
-		peers:          peers,
-		persister:      persister,
-		commitIndex:    0,
-		lastApplied:    0, //.. 初始化没全, 测
-		me:             me,
-		dead:           0,
-		applyCh:        applyCh,
-		replicatorCond: make([]*sync.Cond, len(peers)),
-		state:          FOLLOWER,
-		currentTerm:    0,
-		votedFor:       -1,
+		mu:          sync.RWMutex{},
+		peers:       peers,
+		persister:   persister,
+		me:          me,
+		dead:        0,
+		currentTerm: 0,
+		votedFor:    -1,
 		lm: &LogManager{
 			logs:             make([]LogEntry, 1), // Initialize with a dummy entry at index 0
 			lastTrimmedIndex: 0,
 			lastTrimmedTerm:  0,
 			persister:        persister,
 		},
+		commitIndex:    0,
+		lastApplied:    0,
 		nextIndexes:    make([]int, len(peers)),
 		matchIndexes:   make([]int, len(peers)),
-		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()), // 固定心跳, 时间是多少来着, 10s ?,,
-		electionTimer:  time.NewTimer(RandomElectionTimeout()),  // 随机 选举时长,todo时长还没确定
-		//lastIncludedIndex: 0,
-		//lastIncludedTerm:  -1,
+		state:          FOLLOWER,
+		electionTimer:  time.NewTimer(RandomElectionTimeout()),
+		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()),
+		applyCh:        applyCh,
+		replicatorCond: make([]*sync.Cond, len(peers)),
 	}
-	// 在 崩溃后重新读取信息, 从持久化的介质
-	// 之前没有产生锁, 此方法内部需要 锁来保持 磁盘中的 准确读取到 当前!
-	rf.readPersist(persister.ReadRaftState())
-	//  正确的保持状态> rf.persist()
-	// 需要开共len(peer) - 1 个线程replicator，分别管理对应 peer 的复制状态, apply使用的也是 节点的互斥锁啊
-	rf.applyCond = sync.NewCond(&rf.mu)
 
-	// 为每个不是leader 的 产生一个replicator goroutine
-	for i := 0; i < len(peers); i++ {
-		rf.matchIndexes[i], rf.nextIndexes[i] = 0, rf.lm.LastIndex()+1
-		if i != rf.me {
-			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
-			// start replicator goroutine to replicate entries in batch
-			go rf.replicator(i)
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+	// should use mu to protect applyCond, avoid other goroutine to change the critical section
+	rf.applyCond = sync.NewCond(&rf.mu)
+	// initialize nextIndex and matchIndex, and start replicator goroutine
+	for peer := range peers {
+		rf.matchIndexes[peer], rf.nextIndexes[peer] = 0, rf.getLastLogIndex()+1
+		if peer != rf.me {
+			rf.replicatorCond[peer] = sync.NewCond(&sync.Mutex{})
+			// start replicator goroutine to send log entries to peer
+			go rf.replicator(peer)
 		}
 	}
-	// start ticker goroutine to start elections， 用来触发 heartbeat timeout 和 election timeout
+	// start ticker goroutine to start elections
 	go rf.ticker()
-	//....
-
-	// start applier goroutine to push committed logs into applyCh exactly once， ，用来往 applyCh 中 push 提交的日志并保证 exactly once
-	// 确保applier能获取锁哦!
-	//todo, 这里的锁的问题? 是否死锁 了
+	// start apply goroutine to apply log entries to state machine
 	go rf.applier()
-
 	return rf
 }
+
+//func Make(peers []*labrpc.ClientEnd, me int,
+//	persister *Persister, applyCh chan ApplyMsg) *Raft {
+//
+//	rf := &Raft{
+//		mu: sync.RWMutex{},
+//		// todo,你初始化竟然没有带锁? ...
+//		peers:          peers,
+//		persister:      persister,
+//		commitIndex:    0,
+//		lastApplied:    0, //.. 初始化没全, 测
+//		me:             me,
+//		dead:           0,
+//		applyCh:        applyCh,
+//		replicatorCond: make([]*sync.Cond, len(peers)),
+//		state:          FOLLOWER,
+//		currentTerm:    0,
+//		votedFor:       -1,
+//		lm: &LogManager{
+//			logs:             make([]LogEntry, 1), // Initialize with a dummy entry at index 0
+//			lastTrimmedIndex: 0,
+//			lastTrimmedTerm:  0,
+//			persister:        persister,
+//		},
+//		nextIndexes:    make([]int, len(peers)),
+//		matchIndexes:   make([]int, len(peers)),
+//		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()), // 固定心跳, 时间是多少来着, 10s ?,,
+//		electionTimer:  time.NewTimer(RandomElectionTimeout()),  // 随机 选举时长,todo时长还没确定
+//		//lastIncludedIndex: 0,
+//		//lastIncludedTerm:  -1,
+//	}
+//	// 在 崩溃后重新读取信息, 从持久化的介质
+//	// 之前没有产生锁, 此方法内部需要 锁来保持 磁盘中的 准确读取到 当前!
+//	rf.readPersist(persister.ReadRaftState())
+//	//  正确的保持状态> rf.persist()
+//	// 需要开共len(peer) - 1 个线程replicator，分别管理对应 peer 的复制状态, apply使用的也是 节点的互斥锁啊
+//	rf.applyCond = sync.NewCond(&rf.mu)
+//
+//	// 为每个不是leader 的 产生一个replicator goroutine
+//	for i := 0; i < len(peers); i++ {
+//		rf.matchIndexes[i], rf.nextIndexes[i] = 0, rf.lm.LastIndex()+1
+//		if i != rf.me {
+//			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
+//			// start replicator goroutine to replicate entries in batch
+//			go rf.replicator(i)
+//		}
+//	}
+//	// start ticker goroutine to start elections， 用来触发 heartbeat timeout 和 election timeout
+//	go rf.ticker()
+//	//....
+//
+//	// start applier goroutine to push committed logs into applyCh exactly once， ，用来往 applyCh 中 push 提交的日志并保证 exactly once
+//	// 确保applier能获取锁哦!
+//	//todo, 这里的锁的问题? 是否死锁 了
+//	go rf.applier()
+//
+//	return rf
+//}
 
 // 复制线程, 用于follower同步, leader调用, 去检查
 // 每个 fo有一个leader
@@ -625,9 +692,9 @@ func (rf *Raft) replicateOnceRound(peer int) {
 	prevLogIndex := rf.nextIndexes[peer] - 1
 	if prevLogIndex < rf.lm.FirstIndex() {
 		// only send InstallSnapshot RPC
-		args := rf.genInstallSnapshotRequest()
+		args := rf.genInstallSnapshotArgs()
 		rf.mu.RUnlock()
-		reply := new(InstallSnapshotResponse)
+		reply := new(InstallSnapshotReply)
 		if rf.sendInstallSnapshot(peer, args, reply) {
 			rf.mu.Lock()
 			if rf.state == LEADER && rf.currentTerm == args.Term {
@@ -833,6 +900,13 @@ func (rf *Raft) applier() {
 		rf.lastApplied = max(rf.lastApplied, commitIndex)
 		rf.mu.Unlock()
 	}
+}
+
+// used by upper layer to detect whether there are any logs in current term
+func (rf *Raft) HasLogInCurrentTerm() bool {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.getLastLogTerm() == rf.currentTerm
 }
 
 func (rf *Raft) ChangeState(state RaftState) {
