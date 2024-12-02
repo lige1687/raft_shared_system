@@ -9,52 +9,23 @@ package raft
 // test with the original before submitting.
 //
 
-import (
-	"6.5840/labgob"
-	"bytes"
-	"log"
-	"os"
-	"sync"
-)
+import "sync"
 
-// 存放了raft 的持久化状态
 type Persister struct {
 	mu        sync.Mutex
-	raftstate []byte //  ? 保留了当前节点的一些状态, 因为是持久化
-	// 即raft中需要持久化的信息, 如votedFor , 如 currentterm
-	// 所以需要通过字节的形式写入,
-	snapshot []byte // 快照 ?  为啥是字节数组, 我猜是 快照是持久化存储的
-	// 而不是一条命令的存储,需要一些 encoder将 log变为 字节
+	raftstate []byte
+	snapshot  []byte
 }
 
 func MakePersister() *Persister {
 	return &Persister{}
 }
 
-// 复制所有的日志? 返回一个字节数组
 func clone(orig []byte) []byte {
-
 	x := make([]byte, len(orig))
 	copy(x, orig)
 	return x
 }
-
-func writeToFile(filename string, data []byte) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = file.Write(data)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// 复制一个persister
 
 func (ps *Persister) Copy() *Persister {
 	ps.mu.Lock()
@@ -65,14 +36,12 @@ func (ps *Persister) Copy() *Persister {
 	return np
 }
 
-// 给的是克隆的部分
 func (ps *Persister) ReadRaftState() []byte {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return clone(ps.raftstate)
 }
 
-// 当前所有日志的长度?
 func (ps *Persister) RaftStateSize() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -81,11 +50,13 @@ func (ps *Persister) RaftStateSize() int {
 
 // Save both Raft state and K/V snapshot as a single atomic action,
 // to help avoid them getting out of sync.
-func (ps *Persister) Save(raftstate []byte, snapshot []byte) {
+func (ps *Persister) SaveStateAndSnapshot(raftstate []byte, snapshot []byte) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	ps.raftstate = clone(raftstate)
-	ps.snapshot = clone(snapshot)
+	if snapshot != nil {
+		ps.snapshot = clone(snapshot)
+	}
 }
 
 func (ps *Persister) ReadSnapshot() []byte {
@@ -98,79 +69,4 @@ func (ps *Persister) SnapshotSize() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return len(ps.snapshot)
-}
-
-// SaveRaftState 将 Raft 节点的状态保存到持久化存储
-func (p *Persister) SaveRaftState(state []byte) {
-	// 锁住操作，保证线程安全
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// 这里我们可以使用状态字节数组，进行持久化处理
-	p.raftstate = state
-
-	// 将状态写入文件系统或其他存储媒介
-	err := writeToFile("raft_state", p.raftstate)
-	if err != nil {
-		log.Fatalf("Failed to save raft state: %v", err)
-	}
-}
-
-// restore previously persisted state.
-// 恢复之前的持久化状态（解码）
-// 传入的是一个byte数组，而ReadRaftState()返回的就是[]byte
-// 因此恢复持久化状态应该：
-// 1. data := rf.persister.ReadRaftState()
-// 2. rf.readPersist(data)
-func (ps *Persister) SaveStateAndSnapshot(raftstate []byte, snapshot []byte) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	ps.raftstate = clone(raftstate)
-	if snapshot != nil {
-		ps.snapshot = clone(snapshot)
-	}
-}
-
-// 此时不需要锁, 因为 根本不涉及并发的状态
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-
-	// 需要上锁, 并发的访问可能出现! 多线程同时访问一些内容
-	// 测, 不需要上锁 其实
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
-
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
-	var currentTerm int
-	var votedFor int
-	var log []LogEntry
-
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
-		DPrintf("Raft server %d readPersist ERROR!\n", rf.me)
-	} else {
-		rf.currentTerm = currentTerm
-		rf.votedFor = votedFor
-		rf.lm.logs = log
-
-		rf.lastApplied, rf.commitIndex = rf.lm.FirstIndex(), rf.lm.FirstIndex()
-		//rf.lastIncludedIndex = lastIncludedIndex
-		//rf.lastIncludedTerm = lastIncludedTerm
-
-	}
 }

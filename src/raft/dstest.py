@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import itertools
 import math
@@ -223,7 +223,7 @@ def run_tests(
                         if rc != 0 or archive:
                             output.mkdir(exist_ok=True, parents=True)
                             shutil.copy(path, dest)
- 
+
                         if timing:
                             line = last_line(path)
                             real, _, user, _, system, _ = line.replace(' '*8, '').split(' ')
@@ -249,3 +249,4 @@ def run_tests(
 
 if __name__ == "__main__":
     typer.run(run_tests)
+
