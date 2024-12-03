@@ -134,6 +134,9 @@ func Max(a, b int) int {
 // if most of it isn't being used. This avoids holding references to a bunch of
 // potentially large entries that aren't needed anymore. Simply clearing the
 // entries wouldn't be safe because clients might still be using them.
+// some certain amount could perform well
+
+// return its copy so that caller must reset its own logs
 func shrinkEntries(entries []LogEntry) []LogEntry {
 	const lenMultiple = 2
 	if cap(entries) > len(entries)*lenMultiple {

@@ -66,15 +66,17 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term          int
+	Term          int // raft term
 	Success       bool
 	ConflictIndex int
 	ConflictTerm  int
 }
 
+// generate entries need to be appended by follower
 func (rf *Raft) genAppendEntriesArgs(prevLogIndex int) *AppendEntriesArgs {
 	firstLogIndex := rf.getFirstLog().Index
 	entries := make([]LogEntry, len(rf.logs[prevLogIndex-firstLogIndex+1:]))
+	// trim the logs
 	copy(entries, rf.logs[prevLogIndex-firstLogIndex+1:])
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -108,6 +110,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimer.Reset(RandomElectionTimeout())
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm(§5.3)
+	// scenario that can not be tackled by ae
 	if args.PrevLogIndex < rf.getFirstLog().Index {
 		reply.Term, reply.Success = rf.currentTerm, false
 		return
@@ -120,19 +123,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		lastLogIndex := rf.getLastLog().Index
 		// find the first index of the conflicting term
 		if lastLogIndex < args.PrevLogIndex {
+			// check boundary as first, out of range situation
+
+			//conflict index is designed to find where to update ?
 			// the last log index is smaller than the prevLogIndex, then the conflict index is the last log index
+			// so update from index +1, and term as -1 indicates that
 			reply.ConflictIndex, reply.ConflictTerm = lastLogIndex+1, -1
-		} else {
+		} else { // there must have some logs to be overwrited
+
 			firstLogIndex := rf.getFirstLog().Index
 			// find the first index of the conflicting term
 			index := args.PrevLogIndex
+			// introduce one fast_backup formula : find where to begin overwriting, conflict be set as the first different term
+			// and to find the final conflict term, just replicate once round several time in heartbeats !
+			// and leader can do suitable operations depends on the reply send to it
+
+			// here , just one loop to track back to detect final conflict term
 			for index >= firstLogIndex && rf.logs[index-firstLogIndex].Term == args.PrevLogTerm {
+
 				index--
 			}
+			//ultimately..
 			reply.ConflictIndex, reply.ConflictTerm = index+1, args.PrevLogTerm
 		}
+
 		return
 	}
+	// already found the position and
 	// append any new entries not already in the log
 	firstLogIndex := rf.getFirstLog().Index
 	for index, entry := range args.Entries {
@@ -166,10 +183,9 @@ type InstallSnapshotArgs struct {
 	LastIncludedTerm  int
 	Data              []byte
 	// unused fields
-	// Offset int	// byte offset where chunk is positioned in the snapshot file
-	// Done   bool	// true if this is the last chunk
+	// Offset int	// byte offset where chunk is situated in the snapshot file
+	// some attributes to partition a snapshot
 }
-
 type InstallSnapshotReply struct {
 	Term int
 }

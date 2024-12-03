@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
 
+import datetime
 import itertools
 import math
+import os
+import shutil
 import signal
 import subprocess
-import tempfile
-import shutil
-import time
-import os
 import sys
-import datetime
+import tempfile
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Dict, DefaultDict, Tuple
+from typing import List, Optional, Dict
 
 import typer
-import rich
 from rich import print
-from rich.table import Table
+from rich.live import Live
+from rich.panel import Panel
 from rich.progress import (
     Progress,
     TimeElapsedColumn,
     TimeRemainingColumn,
-    TextColumn,
     BarColumn,
     SpinnerColumn,
 )
-from rich.live import Live
-from rich.panel import Panel
+from rich.table import Table
 from rich.traceback import install
 
 install(show_locals=True)

@@ -12,7 +12,7 @@ package raft
 import "sync"
 
 type Persister struct {
-	mu        sync.Mutex
+	mu        sync.Mutex // mutex and  level of persister
 	raftstate []byte
 	snapshot  []byte
 }
@@ -21,6 +21,7 @@ func MakePersister() *Persister {
 	return &Persister{}
 }
 
+// clone it instead of using original reference
 func clone(orig []byte) []byte {
 	x := make([]byte, len(orig))
 	copy(x, orig)
@@ -48,7 +49,7 @@ func (ps *Persister) RaftStateSize() int {
 	return len(ps.raftstate)
 }
 
-// Save both Raft state and K/V snapshot as a single atomic action,
+// SaveStateAndSnapshot Save both Raft state and K/V snapshot as a single atomic action!
 // to help avoid them getting out of sync.
 func (ps *Persister) SaveStateAndSnapshot(raftstate []byte, snapshot []byte) {
 	ps.mu.Lock()
